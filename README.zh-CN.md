@@ -301,9 +301,9 @@ MS-VGS =
 docs/multi_subject_video_eval.md
 ```
 
-GPU 服务器模型下载、安装命令和服务器版 YAML 模板见：
+Windows GPU 服务器模型下载、安装命令和服务器版 YAML 模板见：
 
 ```text
-docs/model_server_setup.zh-CN.md
+docs/model_server_setup_windows.zh-CN.md
 configs/ms_eval_models.server.yaml
 ```

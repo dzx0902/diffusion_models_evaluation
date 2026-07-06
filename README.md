@@ -283,9 +283,9 @@ Recommended workflow:
 
 See `docs/multi_subject_video_eval.md` for the detailed framework description.
 
-For GPU server model download commands and a server-oriented YAML template, see:
+For Windows GPU server model download commands and a server-oriented YAML template, see:
 
 ```text
-docs/model_server_setup.zh-CN.md
+docs/model_server_setup_windows.zh-CN.md
 configs/ms_eval_models.server.yaml
 ```
