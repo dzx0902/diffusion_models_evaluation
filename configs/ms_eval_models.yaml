@@ -1,0 +1,41 @@
+models:
+  - id: hunyuanvideo_1_5
+    type: t2v
+    enabled: false
+    command_template: >
+      python /path/to/hunyuan/generate.py
+      --prompt "{prompt}"
+      --output "{output_path}"
+      --duration {duration_sec}
+      --fps {fps}
+      --seed {seed}
+
+  - id: wan2_2_ti2v_5b
+    type: ti2v
+    enabled: false
+    command_template: >
+      python /path/to/wan/generate.py
+      --prompt "{prompt}"
+      --image "{input_image}"
+      --output "{output_path}"
+      --fps {fps}
+      --seed {seed}
+
+  - id: cogvideox1_5_5b
+    type: t2v
+    enabled: false
+    command_template: >
+      python /path/to/cogvideox/generate.py
+      --prompt "{prompt}"
+      --output "{output_path}"
+      --seed {seed}
+
+  - id: contentv_8b
+    type: t2v
+    enabled: false
+    command_template: >
+      python /path/to/contentv/generate.py
+      --prompt "{prompt}"
+      --output "{output_path}"
+      --seed {seed}
+

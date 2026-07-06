@@ -1,0 +1,18 @@
+detector:
+  backend: yolo
+  model_path: yolo11x.pt
+  conf_threshold: 0.25
+  class_aliases:
+    car: ["car", "truck", "bus"]
+    dog: ["dog"]
+    person: ["person"]
+    bicycle: ["bicycle"]
+    ball: ["sports ball", "ball"]
+    bird: ["bird"]
+    flower: ["potted plant", "vase"]
+
+benchmark:
+  vq_default: 0.5
+  fusion_iou_threshold: 0.35
+  motion_threshold: 0.05
+

@@ -1,0 +1,91 @@
+tasks:
+  - id: dog_car_walk_static
+    subjects:
+      - name: dog
+        count: 1
+        initial_position: left
+        motion: walks slowly toward the center
+      - name: car
+        count: 1
+        initial_position: right
+        motion: remains stationary
+    scene: outdoor street
+    camera: static camera
+    duration_sec: 4
+    fps: 16
+
+  - id: ball_car_roll_static
+    subjects:
+      - name: ball
+        count: 1
+        initial_position: left
+        motion: rolls slowly toward the center
+      - name: car
+        count: 1
+        initial_position: right
+        motion: remains stationary
+    scene: outdoor street
+    camera: static camera
+    duration_sec: 4
+    fps: 16
+
+  - id: car_flower_static_sway
+    subjects:
+      - name: car
+        count: 1
+        initial_position: left
+        motion: remains stationary
+      - name: flower
+        count: 1
+        initial_position: right
+        motion: sways slightly in the wind
+    scene: outdoor garden road
+    camera: static camera
+    duration_sec: 4
+    fps: 16
+
+  - id: dog_ball_walk_roll
+    subjects:
+      - name: dog
+        count: 1
+        initial_position: left
+        motion: walks slowly toward the ball
+      - name: ball
+        count: 1
+        initial_position: center
+        motion: rolls slightly to the right
+    scene: outdoor park
+    camera: static camera
+    duration_sec: 4
+    fps: 16
+
+  - id: bird_flower_land_near
+    subjects:
+      - name: bird
+        count: 1
+        initial_position: upper left
+        motion: lands near the flower
+      - name: flower
+        count: 1
+        initial_position: lower right
+        motion: remains stationary
+    scene: garden
+    camera: static camera
+    duration_sec: 4
+    fps: 16
+
+  - id: person_bicycle_walk_static
+    subjects:
+      - name: person
+        count: 1
+        initial_position: left
+        motion: walks slowly beside the bicycle
+      - name: bicycle
+        count: 1
+        initial_position: right
+        motion: remains stationary
+    scene: outdoor sidewalk
+    camera: static camera
+    duration_sec: 4
+    fps: 16
+

@@ -1,0 +1,118 @@
+# Server-oriented model command templates.
+#
+# Usage:
+# 1. Prepare model repos and weights on the GPU server.
+# 2. Set MS_MODELS_ROOT, for example: export MS_MODELS_ROOT=/data/ms_video_models
+# 3. Copy selected entries into configs/ms_eval_models.yaml or pass this file with --models.
+# 4. Change enabled to true only after each model's standalone smoke test passes.
+
+models:
+  - id: hunyuanvideo_1_5_480p_t2v
+    type: t2v
+    enabled: false
+    command_template: >
+      bash -lc 'cd "$MS_MODELS_ROOT/HunyuanVideo-1.5" &&
+      conda run -n hunyuanvideo15 torchrun --nproc_per_node=${{MS_HUNYUAN_GPUS:-1}} generate.py
+      --prompt "{prompt}"
+      --image_path none
+      --resolution 480p
+      --aspect_ratio 16:9
+      --seed {seed}
+      --rewrite false
+      --cfg_distilled false
+      --sr false
+      --output_path "{output_path}"
+      --model_path "$MS_MODELS_ROOT/HunyuanVideo-1.5/ckpts"'
+
+  - id: hunyuanvideo_1_5_480p_i2v
+    type: i2v
+    enabled: false
+    command_template: >
+      bash -lc 'cd "$MS_MODELS_ROOT/HunyuanVideo-1.5" &&
+      conda run -n hunyuanvideo15 torchrun --nproc_per_node=${{MS_HUNYUAN_GPUS:-1}} generate.py
+      --prompt "{prompt}"
+      --image_path "{input_image}"
+      --resolution 480p
+      --aspect_ratio 16:9
+      --seed {seed}
+      --rewrite false
+      --cfg_distilled false
+      --sr false
+      --output_path "{output_path}"
+      --model_path "$MS_MODELS_ROOT/HunyuanVideo-1.5/ckpts"'
+
+  - id: wan2_2_ti2v_5b_t2v
+    type: t2v
+    enabled: false
+    command_template: >
+      bash -lc 'cd "$MS_MODELS_ROOT/Wan2.2" &&
+      conda run -n wan22 python generate.py
+      --task ti2v-5B
+      --size 1280*704
+      --ckpt_dir "$MS_MODELS_ROOT/Wan2.2/Wan2.2-TI2V-5B"
+      --offload_model True
+      --convert_model_dtype
+      --t5_cpu
+      --base_seed {seed}
+      --prompt "{prompt}"
+      --save_file "{output_path}"'
+
+  - id: wan2_2_ti2v_5b_i2v
+    type: ti2v
+    enabled: false
+    command_template: >
+      bash -lc 'cd "$MS_MODELS_ROOT/Wan2.2" &&
+      conda run -n wan22 python generate.py
+      --task ti2v-5B
+      --size 1280*704
+      --ckpt_dir "$MS_MODELS_ROOT/Wan2.2/Wan2.2-TI2V-5B"
+      --offload_model True
+      --convert_model_dtype
+      --t5_cpu
+      --base_seed {seed}
+      --image "{input_image}"
+      --prompt "{prompt}"
+      --save_file "{output_path}"'
+
+  - id: cogvideox1_5_5b
+    type: t2v
+    enabled: false
+    command_template: >
+      bash -lc 'cd "$MS_MODELS_ROOT/CogVideo" &&
+      conda run -n cogvideox15 python inference/cli_demo.py
+      --prompt "{prompt}"
+      --model_path "$MS_MODELS_ROOT/CogVideoX1.5-5B"
+      --generate_type t2v
+      --output_path "{output_path}"
+      --num_frames 81
+      --fps {fps}
+      --seed {seed}
+      --dtype bfloat16'
+
+  - id: cogvideox1_5_5b_i2v
+    type: i2v
+    enabled: false
+    command_template: >
+      bash -lc 'cd "$MS_MODELS_ROOT/CogVideo" &&
+      conda run -n cogvideox15 python inference/cli_demo.py
+      --prompt "{prompt}"
+      --image_or_video_path "{input_image}"
+      --model_path "$MS_MODELS_ROOT/CogVideoX1.5-5B-I2V"
+      --generate_type i2v
+      --output_path "{output_path}"
+      --num_frames 49
+      --fps {fps}
+      --seed {seed}
+      --dtype float16'
+
+  - id: contentv_8b
+    type: t2v
+    enabled: false
+    command_template: >
+      bash -lc 'conda run -n contentv8b python "$MS_BENCHMARK_ROOT/scripts/adapters/contentv_generate.py"
+      --repo "$MS_MODELS_ROOT/ContentV"
+      --model-id "$MS_MODELS_ROOT/ContentV-8B"
+      --prompt "{prompt}"
+      --output "{output_path}"
+      --seed {seed}
+      --fps {fps}'

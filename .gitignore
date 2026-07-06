@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+
+outputs/ms_eval/videos/*
+outputs/ms_eval/frames/*
+outputs/ms_eval/detections/*
+outputs/ms_eval/metrics/*
+outputs/ms_eval/reports/*
+outputs/ms_eval/pseudo_refs/*
+
+!outputs/ms_eval/videos/.gitkeep
+!outputs/ms_eval/frames/.gitkeep
+!outputs/ms_eval/detections/.gitkeep
+!outputs/ms_eval/metrics/.gitkeep
+!outputs/ms_eval/reports/.gitkeep
+!outputs/ms_eval/pseudo_refs/.gitkeep
+
