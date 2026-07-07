@@ -43,7 +43,9 @@ function Invoke-NoProxy {
     "http_proxy",
     "https_proxy",
     "all_proxy",
-    "HF_ENDPOINT"
+    "HF_ENDPOINT",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8"
   )
   $saved = @()
   foreach ($name in $envNames) {
@@ -62,6 +64,8 @@ function Invoke-NoProxy {
     if ($HfEndpoint) {
       $env:HF_ENDPOINT = $HfEndpoint
     }
+    $env:PYTHONIOENCODING = "utf-8"
+    $env:PYTHONUTF8 = "1"
     & $Body
   }
   finally {
@@ -90,6 +94,9 @@ function Invoke-GitClone {
   }
   else {
     git clone $Url $Target
+  }
+  if ($LASTEXITCODE -ne 0) {
+    throw "git clone failed for $Url. Check GitProxy: $GitProxy"
   }
 }
 
@@ -126,7 +133,7 @@ function Invoke-HfSnapshotDownload {
   New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
   New-Item -ItemType Directory -Force -Path $LocalDir | Out-Null
 
-  $args = @("download", $RepoId, "--cache-dir", $cacheRoot, "--max-workers", "1")
+  $args = @("download", $RepoId, "--cache-dir", $cacheRoot, "--max-workers", "1", "--quiet")
   foreach ($pattern in $Include) {
     $args += @("--include", $pattern)
   }

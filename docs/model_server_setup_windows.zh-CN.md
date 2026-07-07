@@ -487,6 +487,7 @@ python scripts\ms_run_benchmark.py `
 - HunyuanVideo-1.5 的 I2V 可能需要 gated vision encoder 权限。
 - 如果 `hf download` 提示 `Ignoring --include since filenames have been explicitly set`，说明当前 `hf` CLI 把 `--include` 后面的多个模式误解析成了文件名。每个匹配模式都要单独写一个 `--include`，例如 `--include "config.json" --include "scheduler/*"`。
 - 如果 Windows 上出现 `.incomplete` 的 `FileNotFoundError`，不要继续用 `hf download --local-dir` 下载到深层模型目录。改用本文档的 `--cache-dir ...\.hf_cache` 下载，然后把 snapshot 内容复制到目标目录；脚本版已经使用这种方式。
+- 如果 `hf` 已经下载完成但报 `'gbk' codec can't encode character '\u2713'`，这是 Windows 控制台编码无法打印 `✓ Downloaded`。脚本版已设置 `PYTHONIOENCODING=utf-8`、`PYTHONUTF8=1` 并使用 `hf download --quiet` 避免这个问题。
 - 若一直卡在 `.lock`，先结束其他 `hf` 进程，再删除对应 `.\ckpts\.cache\huggingface\*.lock` 后重试。
 - 如果命令里路径包含空格，建议把部署目录放在无空格路径下；脚本默认的 `.m` 会跟随当前仓库目录。
 - Windows PowerShell 的多行续行符是反引号。

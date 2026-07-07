@@ -27,7 +27,7 @@ function Write-Step {
 function Invoke-NoProxy {
   param([scriptblock]$Body)
 
-  $names = @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "HF_ENDPOINT")
+  $names = @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "HF_ENDPOINT", "PYTHONIOENCODING", "PYTHONUTF8")
   $saved = @()
   foreach ($name in $names) {
     $saved += [pscustomobject]@{
@@ -43,6 +43,8 @@ function Invoke-NoProxy {
       }
     }
     $env:HF_ENDPOINT = $HfEndpoint
+    $env:PYTHONIOENCODING = "utf-8"
+    $env:PYTHONUTF8 = "1"
     & $Body
   }
   finally {
@@ -70,6 +72,9 @@ function Invoke-GitClone {
   else {
     git clone $Url $Destination
   }
+  if ($LASTEXITCODE -ne 0) {
+    throw "git clone failed for $Url. Check GitProxy: $GitProxy"
+  }
 }
 
 function Copy-DirectoryContents {
@@ -96,7 +101,7 @@ function Invoke-HfDownload {
   Write-Step "HF download $RepoId"
   New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
 
-  $args = @("download", $RepoId, "--cache-dir", $CacheRoot, "--max-workers", "1")
+  $args = @("download", $RepoId, "--cache-dir", $CacheRoot, "--max-workers", "1", "--quiet")
   foreach ($pattern in $Include) {
     $args += @("--include", $pattern)
   }
