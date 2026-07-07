@@ -3,8 +3,8 @@
 # Usage:
 # 1. Prepare model repos and weights on the Windows GPU server.
 # 2. Set environment variables in PowerShell:
-#    $env:MS_MODELS_ROOT = "D:\ms_video_models"
-#    $env:MS_BENCHMARK_ROOT = "D:\diffusion_models_evaluation"
+#    $env:MS_BENCHMARK_ROOT = (Resolve-Path ".").Path
+#    $env:MS_MODELS_ROOT = Join-Path $env:MS_BENCHMARK_ROOT ".m"
 #    $env:MS_HUNYUAN_GPUS = "1"
 # 3. Change enabled to true only after each model's standalone smoke test passes.
 

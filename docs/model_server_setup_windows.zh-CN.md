@@ -13,11 +13,11 @@
 
 ## 0. 目录约定
 
-建议在 PowerShell 中设置：
+手动配置时建议使用相对当前部署目录的路径，不要写死盘符：
 
 ```powershell
-$env:MS_MODELS_ROOT = "D:\ms_video_models"
-$env:MS_BENCHMARK_ROOT = "D:\diffusion_models_evaluation"
+$env:MS_BENCHMARK_ROOT = (Resolve-Path ".").Path
+$env:MS_MODELS_ROOT = Join-Path $env:MS_BENCHMARK_ROOT ".m"
 $env:MS_HUNYUAN_GPUS = "1"
 
 New-Item -ItemType Directory -Force -Path $env:MS_MODELS_ROOT
@@ -29,13 +29,93 @@ New-Item -ItemType Directory -Force -Path $env:MS_MODELS_ROOT
 - `MS_BENCHMARK_ROOT`：本 benchmark 仓库目录。
 - `MS_HUNYUAN_GPUS`：HunyuanVideo 使用的 GPU 进程数，单卡先设为 `1`。
 
-如果你的仓库在当前工作目录，可以这样设置：
+## 1. 一键配置、下载和 smoke test
+
+本仓库提供了 Windows PowerShell 一键脚本：
 
 ```powershell
-$env:MS_BENCHMARK_ROOT = (Resolve-Path ".").Path
+Set-Location <本 benchmark 仓库目录>
+.\scripts\setup_windows_models.ps1 `
+  -GitProxy "http://127.0.0.1:8001" `
+  -HfEndpoint "https://hf-mirror.com"
 ```
 
-## 1. 准备 benchmark 环境
+如果只想先完整下载模型仓库和权重，不创建 conda 环境、不跑 smoke test，使用下载专用脚本：
+
+```powershell
+Set-Location <本 benchmark 仓库目录>
+.\scripts\download_windows_models.ps1
+```
+
+该脚本按当前服务器环境默认使用：
+
+- 模型目录：当前仓库下的 `.ms_video_models`
+- HF cache：当前模型目录所在盘根目录下的 `hf_cache_ms`，例如 `T:\hf_cache_ms`
+- Git 代理：`http://127.0.0.1:8001`
+- HF 镜像：`https://hf-mirror.com`
+- 不下载需要 `HF_TOKEN` 的 gated vision encoder
+
+脚本会自动把 `MS_BENCHMARK_ROOT` 设置为脚本所在仓库根目录；如果不传 `-ModelsRoot`，默认把模型放到该仓库目录下的 `.m`。这样部署目录移动到哪个盘，模型目录也跟着当前部署目录走。
+
+如果部署目录本身很深，Windows 上 `hf download --local-dir` 可能因为本地缓存路径过长报 `FileNotFoundError`。脚本不会直接用 `--local-dir` 下载到模型目录，而是先下载到模型根目录下较短的 `.hf_cache`，再复制到目标权重目录。
+
+```powershell
+Set-Location <本 benchmark 仓库目录>
+.\scripts\setup_windows_models.ps1 `
+  -SubstDrive "M:" `
+  -GitProxy "http://127.0.0.1:8001" `
+  -HfEndpoint "https://hf-mirror.com"
+```
+
+代理冲突的处理方式：
+
+- `git clone` 阶段只对当前 `git clone` 命令注入 `-c http.proxy=... -c https.proxy=...`，用于访问 GitHub。
+- `hf download` 和 `modelscope download` 阶段会临时清空 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量，并设置 `HF_ENDPOINT`，用于从 Hugging Face 镜像源下载。
+- 每个阶段结束后会恢复原来的代理环境变量，不会永久修改系统环境。
+
+常用选项：
+
+```powershell
+# 默认把模型放到当前仓库下的 .m
+.\scripts\setup_windows_models.ps1 -GitProxy "http://127.0.0.1:8001"
+
+# 部署路径较深时，用短盘符运行，避免 hf 本地缓存路径过长
+.\scripts\setup_windows_models.ps1 -SubstDrive "M:" -GitProxy "http://127.0.0.1:8001"
+
+# 下载 I2V 相关权重并运行 I2V smoke test；Hunyuan I2V vision encoder 需要先设置 HF_TOKEN
+.\scripts\setup_windows_models.ps1 -GitProxy "http://127.0.0.1:8001" -IncludeI2V
+
+# 如果确实要把模型放到其他位置，再显式传入 -ModelsRoot
+.\scripts\setup_windows_models.ps1 -ModelsRoot ".\models" -GitProxy "http://127.0.0.1:8001"
+
+# 只配置仓库、环境和下载权重，不跑 smoke test
+.\scripts\setup_windows_models.ps1 -GitProxy "http://127.0.0.1:8001" -NoSmokeTest
+
+# 已经手动准备好 conda 环境时，跳过环境创建和 pip install
+.\scripts\setup_windows_models.ps1 -GitProxy "http://127.0.0.1:8001" -SkipConda
+```
+
+脚本默认会依次准备 benchmark 环境、HunyuanVideo-1.5、Wan2.2-TI2V-5B、CogVideoX1.5-5B 和 ContentV-8B，并运行 T2V smoke test。
+
+手动执行下载命令时，建议先定义这个辅助函数。它会让 `hf` 先下载到较短的 cache 目录，再把 snapshot 内容复制到目标权重目录，避开 Windows `--local-dir` 深路径缓存问题：
+
+```powershell
+function Copy-HfSnapshot {
+  param(
+    [Parameter(Mandatory=$true)][string[]]$Snapshot,
+    [Parameter(Mandatory=$true)][string]$Destination
+  )
+
+  $snapshotPath = $Snapshot | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Last 1
+  if (-not $snapshotPath) {
+    throw "Cannot locate hf snapshot path: $Snapshot"
+  }
+  New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+  Get-ChildItem -LiteralPath $snapshotPath -Force | Copy-Item -Destination $Destination -Recurse -Force
+}
+```
+
+## 2. 准备 benchmark 环境
 
 ```powershell
 Set-Location $env:MS_BENCHMARK_ROOT
@@ -51,7 +131,7 @@ pip install -U "huggingface_hub[cli]" modelscope
 $env:HF_ENDPOINT = "https://hf-mirror.com"
 ```
 
-## 2. HunyuanVideo-1.5
+## 3. HunyuanVideo-1.5
 
 官方仓库：
 
@@ -79,23 +159,43 @@ pip install -U "huggingface_hub[cli]" modelscope
 
 ```powershell
 Set-Location (Join-Path $env:MS_MODELS_ROOT "HunyuanVideo-1.5")
-hf download tencent/HunyuanVideo-1.5 `
-  --local-dir .\ckpts `
-  --include "config.json" "scheduler/*" "vae/*" "transformer/480p_t2v/*"
-hf download Qwen/Qwen2.5-VL-7B-Instruct --local-dir .\ckpts\text_encoder\llm
-hf download google/byt5-small --local-dir .\ckpts\text_encoder\byt5-small
+Copy-HfSnapshot `
+  -Snapshot (hf download tencent/HunyuanVideo-1.5 `
+  --cache-dir (Join-Path $env:MS_MODELS_ROOT ".hf_cache") `
+  --include "config.json" `
+  --include "scheduler/*" `
+  --include "vae/*" `
+  --include "transformer/480p_t2v/*" `
+  --max-workers 1) `
+  -Destination .\ckpts
+
+Copy-HfSnapshot `
+  -Snapshot (hf download Qwen/Qwen2.5-VL-7B-Instruct --cache-dir (Join-Path $env:MS_MODELS_ROOT ".hf_cache") --max-workers 1) `
+  -Destination .\ckpts\text_encoder\llm
+
+Copy-HfSnapshot `
+  -Snapshot (hf download google/byt5-small --cache-dir (Join-Path $env:MS_MODELS_ROOT ".hf_cache") --max-workers 1) `
+  -Destination .\ckpts\text_encoder\byt5-small
+
 modelscope download --model AI-ModelScope/Glyph-SDXL-v2 --local_dir .\ckpts\text_encoder\Glyph-SDXL-v2
 ```
 
 如果还要测 Hunyuan I2V，再补下载 480p I2V transformer 和 vision encoder。vision encoder 可能需要申请 gated model 权限，拿到 Hugging Face token 后：
 
 ```powershell
-hf download tencent/HunyuanVideo-1.5 `
-  --local-dir .\ckpts `
-  --include "transformer/480p_i2v/*"
-hf download black-forest-labs/FLUX.1-Redux-dev `
-  --local-dir .\ckpts\vision_encoder\siglip `
-  --token $env:HF_TOKEN
+Copy-HfSnapshot `
+  -Snapshot (hf download tencent/HunyuanVideo-1.5 `
+  --cache-dir (Join-Path $env:MS_MODELS_ROOT ".hf_cache") `
+  --include "transformer/480p_i2v/*" `
+  --max-workers 1) `
+  -Destination .\ckpts
+
+Copy-HfSnapshot `
+  -Snapshot (hf download black-forest-labs/FLUX.1-Redux-dev `
+  --cache-dir (Join-Path $env:MS_MODELS_ROOT ".hf_cache") `
+  --token $env:HF_TOKEN `
+  --max-workers 1) `
+  -Destination .\ckpts\vision_encoder\siglip
 ```
 
 单条 T2V smoke test：
@@ -120,7 +220,7 @@ benchmark YAML 模板：
 - `hunyuanvideo_1_5_480p_t2v`
 - `hunyuanvideo_1_5_480p_i2v`
 
-## 3. Wan2.2-TI2V-5B
+## 4. Wan2.2-TI2V-5B
 
 官方仓库：
 
@@ -145,7 +245,9 @@ pip install -U "huggingface_hub[cli]"
 
 ```powershell
 Set-Location (Join-Path $env:MS_MODELS_ROOT "Wan2.2")
-huggingface-cli download Wan-AI/Wan2.2-TI2V-5B --local-dir .\Wan2.2-TI2V-5B
+Copy-HfSnapshot `
+  -Snapshot (hf download Wan-AI/Wan2.2-TI2V-5B --cache-dir (Join-Path $env:MS_MODELS_ROOT ".hf_cache") --max-workers 1) `
+  -Destination .\Wan2.2-TI2V-5B
 ```
 
 单条 T2V smoke test：
@@ -186,7 +288,7 @@ benchmark YAML 模板：
 - `wan2_2_ti2v_5b_t2v`
 - `wan2_2_ti2v_5b_i2v`
 
-## 4. CogVideoX1.5-5B / CogVideoX1.5-5B-I2V
+## 5. CogVideoX1.5-5B / CogVideoX1.5-5B-I2V
 
 官方仓库：
 
@@ -211,8 +313,12 @@ pip install -U "huggingface_hub[cli]"
 
 ```powershell
 Set-Location $env:MS_MODELS_ROOT
-huggingface-cli download zai-org/CogVideoX1.5-5B --local-dir .\CogVideoX1.5-5B
-huggingface-cli download zai-org/CogVideoX1.5-5B-I2V --local-dir .\CogVideoX1.5-5B-I2V
+Copy-HfSnapshot `
+  -Snapshot (hf download zai-org/CogVideoX1.5-5B --cache-dir (Join-Path $env:MS_MODELS_ROOT ".hf_cache") --max-workers 1) `
+  -Destination .\CogVideoX1.5-5B
+Copy-HfSnapshot `
+  -Snapshot (hf download zai-org/CogVideoX1.5-5B-I2V --cache-dir (Join-Path $env:MS_MODELS_ROOT ".hf_cache") --max-workers 1) `
+  -Destination .\CogVideoX1.5-5B-I2V
 ```
 
 单条 T2V smoke test：
@@ -251,7 +357,7 @@ benchmark YAML 模板：
 - `cogvideox1_5_5b`
 - `cogvideox1_5_5b_i2v`
 
-## 5. ContentV-8B
+## 6. ContentV-8B
 
 官方仓库：
 
@@ -276,7 +382,9 @@ pip install -U "huggingface_hub[cli]"
 
 ```powershell
 Set-Location $env:MS_MODELS_ROOT
-huggingface-cli download ByteDance/ContentV-8B --local-dir .\ContentV-8B
+Copy-HfSnapshot `
+  -Snapshot (hf download ByteDance/ContentV-8B --cache-dir (Join-Path $env:MS_MODELS_ROOT ".hf_cache") --max-workers 1) `
+  -Destination .\ContentV-8B
 ```
 
 说明：官方 `demo.py` 把 prompt 和输出路径写在脚本里，不适合 benchmark 批量调用。本仓库提供了 adapter：
@@ -302,7 +410,7 @@ benchmark YAML 模板：
 
 - `contentv_8b`
 
-## 6. 使用 Windows YAML 模板运行 benchmark
+## 7. 使用 Windows YAML 模板运行 benchmark
 
 先 dry-run：
 
@@ -353,7 +461,7 @@ python scripts\ms_generate.py `
   --skip-existing
 ```
 
-## 7. 后续评估命令
+## 8. 后续评估命令
 
 ```powershell
 python scripts\ms_extract_frames.py --sample-every 4
@@ -371,12 +479,15 @@ python scripts\ms_run_benchmark.py `
   --skip-existing
 ```
 
-## 8. 注意事项
+## 9. 注意事项
 
 - 所有模型命令建议先单独 smoke test，通过后再接入 benchmark。
 - `configs/ms_eval_models.server.yaml` 默认全部 `enabled: false`，避免误跑大模型。
 - 本文档中的下载命令只覆盖当前 YAML 模板里的 5-9B 模型。不要额外执行各官方 README 里下载全系列或 14B/13B 权重的命令。
 - HunyuanVideo-1.5 的 I2V 可能需要 gated vision encoder 权限。
-- 如果命令里路径包含空格，建议把 `MS_MODELS_ROOT` 和 `MS_BENCHMARK_ROOT` 放在无空格路径下，例如 `D:\ms_video_models`。
+- 如果 `hf download` 提示 `Ignoring --include since filenames have been explicitly set`，说明当前 `hf` CLI 把 `--include` 后面的多个模式误解析成了文件名。每个匹配模式都要单独写一个 `--include`，例如 `--include "config.json" --include "scheduler/*"`。
+- 如果 Windows 上出现 `.incomplete` 的 `FileNotFoundError`，不要继续用 `hf download --local-dir` 下载到深层模型目录。改用本文档的 `--cache-dir ...\.hf_cache` 下载，然后把 snapshot 内容复制到目标目录；脚本版已经使用这种方式。
+- 若一直卡在 `.lock`，先结束其他 `hf` 进程，再删除对应 `.\ckpts\.cache\huggingface\*.lock` 后重试。
+- 如果命令里路径包含空格，建议把部署目录放在无空格路径下；脚本默认的 `.m` 会跟随当前仓库目录。
 - Windows PowerShell 的多行续行符是反引号。
 - ContentV 使用本仓库 adapter 暴露 prompt/output/seed 参数。
