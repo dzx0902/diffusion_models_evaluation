@@ -121,6 +121,41 @@ function New-HfLocalCacheDirs {
   }
 }
 
+function Resolve-HfSnapshotPath {
+  param(
+    [object[]]$Output,
+    [string]$RepoId
+  )
+
+  $candidates = @()
+  foreach ($line in $Output) {
+    if (-not $line) {
+      continue
+    }
+
+    $text = [string]$line
+    if ($text -match '^\s*path:\s*(.+?)\s*$') {
+      $candidates += $Matches[1]
+      continue
+    }
+
+    try {
+      if (Test-Path -LiteralPath $text) {
+        $candidates += $text
+      }
+    }
+    catch {
+      continue
+    }
+  }
+
+  $snapshot = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Last 1
+  if (-not $snapshot) {
+    throw "Cannot locate hf snapshot path for $RepoId. Output: $Output"
+  }
+  return $snapshot
+}
+
 function Invoke-HfSnapshotDownload {
   param(
     [string]$RepoId,
@@ -146,10 +181,7 @@ function Invoke-HfSnapshotDownload {
     throw "hf download failed for $RepoId"
   }
 
-  $snapshotPath = ($output | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Last 1)
-  if (-not $snapshotPath) {
-    throw "Cannot locate hf snapshot path for $RepoId. Output: $output"
-  }
+  $snapshotPath = Resolve-HfSnapshotPath -Output $output -RepoId $RepoId
 
   Get-ChildItem -LiteralPath $snapshotPath -Force | Copy-Item -Destination $LocalDir -Recurse -Force
 }

@@ -91,6 +91,41 @@ function Copy-DirectoryContents {
   $global:LASTEXITCODE = 0
 }
 
+function Resolve-HfSnapshotPath {
+  param(
+    [object[]]$Output,
+    [string]$RepoId
+  )
+
+  $candidates = @()
+  foreach ($line in $Output) {
+    if (-not $line) {
+      continue
+    }
+
+    $text = [string]$line
+    if ($text -match '^\s*path:\s*(.+?)\s*$') {
+      $candidates += $Matches[1]
+      continue
+    }
+
+    try {
+      if (Test-Path -LiteralPath $text) {
+        $candidates += $text
+      }
+    }
+    catch {
+      continue
+    }
+  }
+
+  $snapshot = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Last 1
+  if (-not $snapshot) {
+    throw "Cannot locate downloaded snapshot for $RepoId. hf output: $Output"
+  }
+  return $snapshot
+}
+
 function Invoke-HfDownload {
   param(
     [string]$RepoId,
@@ -111,10 +146,7 @@ function Invoke-HfDownload {
     throw "hf download failed for $RepoId"
   }
 
-  $snapshot = $output | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Last 1
-  if (-not $snapshot) {
-    throw "Cannot locate downloaded snapshot for $RepoId. hf output: $output"
-  }
+  $snapshot = Resolve-HfSnapshotPath -Output $output -RepoId $RepoId
 
   Copy-DirectoryContents -Source $snapshot -Destination $Destination
   Write-Host "Copied to $Destination"
