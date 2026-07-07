@@ -133,7 +133,7 @@ function Invoke-HfSnapshotDownload {
   New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
   New-Item -ItemType Directory -Force -Path $LocalDir | Out-Null
 
-  $args = @("download", $RepoId, "--cache-dir", $cacheRoot, "--max-workers", "1", "--quiet")
+  $args = @("download", $RepoId, "--cache-dir", $cacheRoot, "--max-workers", "1")
   foreach ($pattern in $Include) {
     $args += @("--include", $pattern)
   }

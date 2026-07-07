@@ -101,7 +101,7 @@ function Invoke-HfDownload {
   Write-Step "HF download $RepoId"
   New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
 
-  $args = @("download", $RepoId, "--cache-dir", $CacheRoot, "--max-workers", "1", "--quiet")
+  $args = @("download", $RepoId, "--cache-dir", $CacheRoot, "--max-workers", "1")
   foreach ($pattern in $Include) {
     $args += @("--include", $pattern)
   }
