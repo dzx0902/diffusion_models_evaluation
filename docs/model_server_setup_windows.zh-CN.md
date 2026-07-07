@@ -1,4 +1,4 @@
-# Windows GPU 服务器模型准备命令
+# Windows GPU 服务器模型准备命令（仅 5-9B）
 
 本文档给出 Windows + PowerShell 服务器上的规范化部署方式，用于配合本仓库的 `ms_generate.py` 批量评测视频生成模型。
 
@@ -6,6 +6,8 @@
 
 - 本 benchmark 仓库只负责调度、抽帧、评估和报告。
 - 视频生成模型需要提前下载到 Windows GPU 服务器。
+- 本文档只准备 5-9B 规模模型：HunyuanVideo-1.5 8.3B、Wan2.2-TI2V-5B、CogVideoX1.5-5B / 5B-I2V、ContentV-8B。
+- 不需要下载 Wan 14B、旧版 HunyuanVideo 13B、CogVideoX 更大变体或其他全系列权重。
 - 每个模型建议使用独立 conda 环境。
 - `configs/ms_eval_models.server.yaml` 已改为 Windows/PowerShell 命令模板。
 
@@ -71,19 +73,26 @@ pip install -i https://mirrors.tencent.com/pypi/simple/ --upgrade tencentcloud-s
 pip install -U "huggingface_hub[cli]" modelscope
 ```
 
-下载基础权重和文本编码器：
+下载 8.3B 的 480p 基础权重和文本编码器。不要直接执行不带 `--include` 的 `hf download tencent/HunyuanVideo-1.5`，否则会把 720p、distilled、SR 等多套 transformer 权重一起下载下来。
+
+如果只测 T2V，只需要下载 `transformer/480p_t2v/*`：
 
 ```powershell
 Set-Location (Join-Path $env:MS_MODELS_ROOT "HunyuanVideo-1.5")
-hf download tencent/HunyuanVideo-1.5 --local-dir .\ckpts
+hf download tencent/HunyuanVideo-1.5 `
+  --local-dir .\ckpts `
+  --include "config.json" "scheduler/*" "vae/*" "transformer/480p_t2v/*"
 hf download Qwen/Qwen2.5-VL-7B-Instruct --local-dir .\ckpts\text_encoder\llm
 hf download google/byt5-small --local-dir .\ckpts\text_encoder\byt5-small
 modelscope download --model AI-ModelScope/Glyph-SDXL-v2 --local_dir .\ckpts\text_encoder\Glyph-SDXL-v2
 ```
 
-I2V 相关的 vision encoder 可能需要申请 gated model 权限。拿到 Hugging Face token 后：
+如果还要测 Hunyuan I2V，再补下载 480p I2V transformer 和 vision encoder。vision encoder 可能需要申请 gated model 权限，拿到 Hugging Face token 后：
 
 ```powershell
+hf download tencent/HunyuanVideo-1.5 `
+  --local-dir .\ckpts `
+  --include "transformer/480p_i2v/*"
 hf download black-forest-labs/FLUX.1-Redux-dev `
   --local-dir .\ckpts\vision_encoder\siglip `
   --token $env:HF_TOKEN
@@ -132,7 +141,7 @@ pip install -r requirements.txt
 pip install -U "huggingface_hub[cli]"
 ```
 
-下载 5B 权重：
+只下载 TI2V-5B 权重。不要下载 `Wan2.2-T2V-A14B`、`Wan2.2-I2V-A14B` 或 Wan2.2 全系列权重。
 
 ```powershell
 Set-Location (Join-Path $env:MS_MODELS_ROOT "Wan2.2")
@@ -198,7 +207,7 @@ pip install -r requirements.txt
 pip install -U "huggingface_hub[cli]"
 ```
 
-预下载权重：
+只预下载 5B T2V 和 5B I2V 权重：
 
 ```powershell
 Set-Location $env:MS_MODELS_ROOT
@@ -263,7 +272,7 @@ pip install -r requirements.txt
 pip install -U "huggingface_hub[cli]"
 ```
 
-预下载权重：
+只预下载 8B 权重：
 
 ```powershell
 Set-Location $env:MS_MODELS_ROOT
@@ -366,8 +375,8 @@ python scripts\ms_run_benchmark.py `
 
 - 所有模型命令建议先单独 smoke test，通过后再接入 benchmark。
 - `configs/ms_eval_models.server.yaml` 默认全部 `enabled: false`，避免误跑大模型。
+- 本文档中的下载命令只覆盖当前 YAML 模板里的 5-9B 模型。不要额外执行各官方 README 里下载全系列或 14B/13B 权重的命令。
 - HunyuanVideo-1.5 的 I2V 可能需要 gated vision encoder 权限。
 - 如果命令里路径包含空格，建议把 `MS_MODELS_ROOT` 和 `MS_BENCHMARK_ROOT` 放在无空格路径下，例如 `D:\ms_video_models`。
 - Windows PowerShell 的多行续行符是反引号。
 - ContentV 使用本仓库 adapter 暴露 prompt/output/seed 参数。
-
