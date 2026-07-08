@@ -217,6 +217,23 @@ function Invoke-PipInstall {
   conda run -n $EnvName pip install @PipArgs
 }
 
+function Invoke-HunyuanPipInstall {
+  param([string]$Repo)
+
+  if ($SkipConda) {
+    return
+  }
+
+  $source = Join-Path $Repo "requirements.txt"
+  $filtered = Join-Path ([System.IO.Path]::GetTempPath()) "hunyuanvideo15_requirements_windows.txt"
+  Get-Content -LiteralPath $source |
+    Where-Object { $_ -notmatch "^\s*(angelslim|triton)\b" } |
+    Set-Content -LiteralPath $filtered -Encoding ascii
+
+  Write-Warning "Installing HunyuanVideo requirements without angelslim/triton because triton has no Windows wheel."
+  Invoke-PipInstall -EnvName "hunyuanvideo15" -PipArgs @("-r", $filtered)
+}
+
 function Ensure-TestImage {
   $dir = Join-Path $env:MS_BENCHMARK_ROOT "outputs\ms_eval\pseudo_refs"
   $path = Join-Path $dir "example.png"
@@ -296,7 +313,7 @@ function Setup-Hunyuan {
     Invoke-GitClone -Url "https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5.git" -Target $repo
     Set-Location $repo
     Invoke-CondaCreate -Name "hunyuanvideo15"
-    Invoke-PipInstall -EnvName "hunyuanvideo15" -PipArgs @("-r", "requirements.txt")
+    Invoke-HunyuanPipInstall -Repo $repo
     Invoke-PipInstall -EnvName "hunyuanvideo15" -PipArgs @("-i", "https://mirrors.tencent.com/pypi/simple/", "--upgrade", "tencentcloud-sdk-python")
     Invoke-PipInstall -EnvName "hunyuanvideo15" -PipArgs @("-U", "huggingface_hub[cli]", "modelscope")
   }
