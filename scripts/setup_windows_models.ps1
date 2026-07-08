@@ -246,6 +246,41 @@ function Ensure-TestImage {
   return $path
 }
 
+function Invoke-HunyuanGenerate {
+  param(
+    [string]$Prompt,
+    [string]$ImagePath,
+    [string]$OutputPath
+  )
+
+  if ([int]$env:MS_HUNYUAN_GPUS -le 1) {
+    conda run -n hunyuanvideo15 python generate.py `
+      --prompt $Prompt `
+      --image_path $ImagePath `
+      --resolution 480p `
+      --aspect_ratio "16:9" `
+      --seed 0 `
+      --rewrite false `
+      --cfg_distilled false `
+      --sr false `
+      --output_path $OutputPath `
+      --model_path ".\ckpts"
+  }
+  else {
+    conda run -n hunyuanvideo15 torchrun --nproc_per_node $env:MS_HUNYUAN_GPUS --rdzv-conf use_libuv=false generate.py `
+      --prompt $Prompt `
+      --image_path $ImagePath `
+      --resolution 480p `
+      --aspect_ratio "16:9" `
+      --seed 0 `
+      --rewrite false `
+      --cfg_distilled false `
+      --sr false `
+      --output_path $OutputPath `
+      --model_path ".\ckpts"
+  }
+}
+
 function Setup-BenchmarkEnv {
   Invoke-Step "Benchmark environment" {
     Set-Location $env:MS_BENCHMARK_ROOT
@@ -291,17 +326,10 @@ function Setup-Hunyuan {
     Invoke-Step "HunyuanVideo-1.5 T2V smoke test" {
       Set-Location $repo
       New-Item -ItemType Directory -Force -Path ".\outputs" | Out-Null
-      conda run -n hunyuanvideo15 torchrun --nproc_per_node $env:MS_HUNYUAN_GPUS generate.py `
-        --prompt "A realistic dog walks on an outdoor street." `
-        --image_path none `
-        --resolution 480p `
-        --aspect_ratio 16:9 `
-        --seed 0 `
-        --rewrite false `
-        --cfg_distilled false `
-        --sr false `
-        --output_path ".\outputs\smoke_hunyuan.mp4" `
-        --model_path ".\ckpts"
+      Invoke-HunyuanGenerate `
+        -Prompt "A realistic dog walks on an outdoor street." `
+        -ImagePath "none" `
+        -OutputPath ".\outputs\smoke_hunyuan.mp4"
     }
 
     if ($IncludeI2V) {
@@ -313,17 +341,10 @@ function Setup-Hunyuan {
           return
         }
         $image = Ensure-TestImage
-        conda run -n hunyuanvideo15 torchrun --nproc_per_node $env:MS_HUNYUAN_GPUS generate.py `
-          --prompt "A realistic dog walks beside a stationary car on an outdoor street." `
-          --image_path $image `
-          --resolution 480p `
-          --aspect_ratio 16:9 `
-          --seed 0 `
-          --rewrite false `
-          --cfg_distilled false `
-          --sr false `
-          --output_path ".\outputs\smoke_hunyuan_i2v.mp4" `
-          --model_path ".\ckpts"
+        Invoke-HunyuanGenerate `
+          -Prompt "A realistic dog walks beside a stationary car on an outdoor street." `
+          -ImagePath $image `
+          -OutputPath ".\outputs\smoke_hunyuan_i2v.mp4"
       }
     }
   }
