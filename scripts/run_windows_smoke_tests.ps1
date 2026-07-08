@@ -138,12 +138,14 @@ $ModelsRoot = (Resolve-Path $ModelsRoot).Path
 $env:MS_BENCHMARK_ROOT = $BenchmarkRoot
 $env:MS_MODELS_ROOT = $ModelsRoot
 $env:MS_HUNYUAN_GPUS = [string]$HunyuanGpus
+$env:USE_LIBUV = "0"
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUTF8 = "1"
 
 Write-Host "Benchmark root: $BenchmarkRoot"
 Write-Host "Models root:    $ModelsRoot"
 Write-Host "Hunyuan GPUs:   $HunyuanGpus"
+Write-Host "USE_LIBUV:      $env:USE_LIBUV"
 Write-Host "Include I2V:    $IncludeI2V"
 Write-Host "Skip existing:  $SkipExisting"
 
@@ -163,7 +165,7 @@ $results += Invoke-SmokeTest `
     Set-Location $hunyuanRepo
     New-Item -ItemType Directory -Force -Path ".\outputs" | Out-Null
     Invoke-NativeChecked -FailureMessage "HunyuanVideo T2V smoke test" -Body {
-      conda run -n hunyuanvideo15 torchrun --nproc_per_node $env:MS_HUNYUAN_GPUS generate.py `
+      conda run -n hunyuanvideo15 torchrun --nproc_per_node $env:MS_HUNYUAN_GPUS --rdzv-conf use_libuv=0 generate.py `
         --prompt "A realistic dog walks on an outdoor street." `
         --image_path none `
         --resolution 480p `
@@ -188,7 +190,7 @@ if ($IncludeI2V) {
       Set-Location $hunyuanRepo
       New-Item -ItemType Directory -Force -Path ".\outputs" | Out-Null
       Invoke-NativeChecked -FailureMessage "HunyuanVideo I2V smoke test" -Body {
-        conda run -n hunyuanvideo15 torchrun --nproc_per_node $env:MS_HUNYUAN_GPUS generate.py `
+        conda run -n hunyuanvideo15 torchrun --nproc_per_node $env:MS_HUNYUAN_GPUS --rdzv-conf use_libuv=0 generate.py `
           --prompt "A realistic dog walks beside a stationary car on an outdoor street." `
           --image_path $image `
           --resolution 480p `
