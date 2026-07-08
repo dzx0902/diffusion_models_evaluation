@@ -125,6 +125,41 @@ function Invoke-SmokeTest {
   }
 }
 
+function Invoke-HunyuanGenerate {
+  param(
+    [string]$Prompt,
+    [string]$ImagePath,
+    [string]$OutputPath
+  )
+
+  if ([int]$env:MS_HUNYUAN_GPUS -le 1) {
+    conda run -n hunyuanvideo15 python generate.py `
+      --prompt $Prompt `
+      --image_path $ImagePath `
+      --resolution 480p `
+      --aspect_ratio "16:9" `
+      --seed 0 `
+      --rewrite false `
+      --cfg_distilled false `
+      --sr false `
+      --output_path $OutputPath `
+      --model_path ".\ckpts"
+  }
+  else {
+    conda run -n hunyuanvideo15 torchrun --nproc_per_node $env:MS_HUNYUAN_GPUS --rdzv-conf use_libuv=false generate.py `
+      --prompt $Prompt `
+      --image_path $ImagePath `
+      --resolution 480p `
+      --aspect_ratio "16:9" `
+      --seed 0 `
+      --rewrite false `
+      --cfg_distilled false `
+      --sr false `
+      --output_path $OutputPath `
+      --model_path ".\ckpts"
+  }
+}
+
 if (-not $BenchmarkRoot) {
   $BenchmarkRoot = Resolve-ScriptRoot
 }
@@ -165,17 +200,10 @@ $results += Invoke-SmokeTest `
     Set-Location $hunyuanRepo
     New-Item -ItemType Directory -Force -Path ".\outputs" | Out-Null
     Invoke-NativeChecked -FailureMessage "HunyuanVideo T2V smoke test" -Body {
-      conda run -n hunyuanvideo15 torchrun --nproc_per_node $env:MS_HUNYUAN_GPUS --rdzv-conf use_libuv=0 generate.py `
-        --prompt "A realistic dog walks on an outdoor street." `
-        --image_path none `
-        --resolution 480p `
-        --aspect_ratio 16:9 `
-        --seed 0 `
-        --rewrite false `
-        --cfg_distilled false `
-        --sr false `
-        --output_path ".\outputs\smoke_hunyuan.mp4" `
-        --model_path ".\ckpts"
+      Invoke-HunyuanGenerate `
+        -Prompt "A realistic dog walks on an outdoor street." `
+        -ImagePath "none" `
+        -OutputPath ".\outputs\smoke_hunyuan.mp4"
     }
   }
 
@@ -190,17 +218,10 @@ if ($IncludeI2V) {
       Set-Location $hunyuanRepo
       New-Item -ItemType Directory -Force -Path ".\outputs" | Out-Null
       Invoke-NativeChecked -FailureMessage "HunyuanVideo I2V smoke test" -Body {
-        conda run -n hunyuanvideo15 torchrun --nproc_per_node $env:MS_HUNYUAN_GPUS --rdzv-conf use_libuv=0 generate.py `
-          --prompt "A realistic dog walks beside a stationary car on an outdoor street." `
-          --image_path $image `
-          --resolution 480p `
-          --aspect_ratio 16:9 `
-          --seed 0 `
-          --rewrite false `
-          --cfg_distilled false `
-          --sr false `
-          --output_path ".\outputs\smoke_hunyuan_i2v.mp4" `
-          --model_path ".\ckpts"
+        Invoke-HunyuanGenerate `
+          -Prompt "A realistic dog walks beside a stationary car on an outdoor street." `
+          -ImagePath $image `
+          -OutputPath ".\outputs\smoke_hunyuan_i2v.mp4"
       }
     }
 }
