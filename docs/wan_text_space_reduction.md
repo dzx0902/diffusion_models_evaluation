@@ -38,6 +38,30 @@ cd "$MS_BENCHMARK_ROOT"
 
 conda activate wan22
 python scripts/analyze_wan_text_space.py \
+  --encoder-backend wan \
+  --wan-repo "$MS_MODELS_ROOT/Wan2.2" \
+  --wan-checkpoint-dir "$MS_MODELS_ROOT/Wan2.2/Wan2.2-TI2V-5B" \
+  --tasks configs/ms_eval_tasks.yaml \
+  --prompt-file outputs/text_space/prompt_corpus/wan_prompt_corpus.jsonl \
+  --manifest outputs/ms_eval/metrics/generation_manifest.jsonl \
+  --batch-size 1 \
+  --device cuda \
+  --dtype bf16 \
+  --output-dir outputs/text_space/wan2_2_ti2v_5b
+```
+
+The native Wan backend reuses these files from the original Wan checkpoint:
+
+```text
+Wan2.2-TI2V-5B/models_t5_umt5-xxl-enc-bf16.pth
+Wan2.2-TI2V-5B/google/umt5-xxl/tokenizer.json
+Wan2.2-TI2V-5B/google/umt5-xxl/spiece.model
+```
+
+Alternatively, use a HuggingFace-format text encoder:
+
+```bash
+python scripts/analyze_wan_text_space.py \
   --text-encoder google/umt5-xxl \
   --tasks configs/ms_eval_tasks.yaml \
   --prompt-file outputs/text_space/prompt_corpus/wan_prompt_corpus.jsonl \

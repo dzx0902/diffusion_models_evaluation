@@ -56,6 +56,36 @@ def parse_args() -> argparse.Namespace:
             "$WAN_TEXT_ENCODER, local Wan diffusers paths, then google/umt5-xxl."
         ),
     )
+    parser.add_argument(
+        "--encoder-backend",
+        choices=["auto", "hf", "wan"],
+        default="auto",
+        help="Use HuggingFace from_pretrained or Wan's native T5 .pth loader.",
+    )
+    parser.add_argument(
+        "--wan-repo",
+        type=Path,
+        default=None,
+        help="Path to the Wan2.2 repository when --encoder-backend wan is used.",
+    )
+    parser.add_argument(
+        "--wan-checkpoint-dir",
+        type=Path,
+        default=None,
+        help="Directory containing models_t5_umt5-xxl-enc-bf16.pth and google/umt5-xxl.",
+    )
+    parser.add_argument(
+        "--wan-t5-checkpoint",
+        type=Path,
+        default=None,
+        help="Explicit path to models_t5_umt5-xxl-enc-bf16.pth.",
+    )
+    parser.add_argument(
+        "--wan-tokenizer-dir",
+        type=Path,
+        default=None,
+        help="Explicit path to Wan's local google/umt5-xxl tokenizer directory.",
+    )
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda")
@@ -93,6 +123,35 @@ def parse_args() -> argparse.Namespace:
         default=ROOT / "outputs" / "text_space" / "wan2_2_ti2v_5b",
     )
     return parser.parse_args()
+
+
+class WanNativeTextEncoder:
+    """Small adapter around Wan's native T5EncoderModel."""
+
+    def __init__(
+        self,
+        repo: Path,
+        checkpoint_path: Path,
+        tokenizer_path: Path,
+        text_len: int,
+        dtype: torch.dtype,
+        device: str,
+    ) -> None:
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        from wan.modules.t5 import T5EncoderModel
+
+        self.device = device
+        self.model = T5EncoderModel(
+            text_len=text_len,
+            dtype=dtype,
+            device=torch.device(device),
+            checkpoint_path=str(checkpoint_path),
+            tokenizer_path=str(tokenizer_path),
+        )
+
+    def encode(self, prompts: list[str]) -> list[torch.Tensor]:
+        return self.model(prompts, torch.device(self.device))
 
 
 def _read_prompt_file(path: Path) -> list[str]:
@@ -152,6 +211,29 @@ def resolve_text_encoder(user_value: str) -> str:
     return "google/umt5-xxl"
 
 
+def resolve_wan_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    models_root = Path(os.environ.get("MS_MODELS_ROOT", "")).expanduser()
+    repo = args.wan_repo
+    checkpoint_dir = args.wan_checkpoint_dir
+
+    if repo is None:
+        repo = models_root / "Wan2.2"
+    if checkpoint_dir is None:
+        checkpoint_dir = repo / "Wan2.2-TI2V-5B"
+
+    checkpoint_path = args.wan_t5_checkpoint or checkpoint_dir / "models_t5_umt5-xxl-enc-bf16.pth"
+    tokenizer_path = args.wan_tokenizer_dir or checkpoint_dir / "google" / "umt5-xxl"
+
+    missing = [
+        str(path)
+        for path in [repo, checkpoint_path, tokenizer_path]
+        if not Path(path).exists()
+    ]
+    if missing:
+        raise FileNotFoundError("Wan native text encoder paths missing: " + ", ".join(missing))
+    return Path(repo), Path(checkpoint_path), Path(tokenizer_path)
+
+
 def torch_dtype(name: str) -> torch.dtype:
     if name == "bf16":
         return torch.bfloat16
@@ -161,6 +243,24 @@ def torch_dtype(name: str) -> torch.dtype:
 
 
 def load_text_model(model_id: str, args: argparse.Namespace):
+    backend = args.encoder_backend
+    if backend == "auto" and (args.wan_repo or args.wan_checkpoint_dir or args.wan_t5_checkpoint):
+        backend = "wan"
+    if backend == "wan":
+        repo, checkpoint_path, tokenizer_path = resolve_wan_paths(args)
+        return (
+            "wan",
+            WanNativeTextEncoder(
+                repo=repo,
+                checkpoint_path=checkpoint_path,
+                tokenizer_path=tokenizer_path,
+                text_len=args.max_length,
+                dtype=torch_dtype(args.dtype),
+                device=args.device,
+            ),
+            None,
+        )
+
     tokenizer = AutoTokenizer.from_pretrained(
         model_id,
         local_files_only=args.local_files_only,
@@ -182,13 +282,14 @@ def load_text_model(model_id: str, args: argparse.Namespace):
         )
     model.to(args.device)
     model.eval()
-    return tokenizer, model
+    return "hf", tokenizer, model
 
 
 def encode_prompts(
     prompts: list[str],
-    tokenizer: Any,
-    model: torch.nn.Module,
+    backend: str,
+    tokenizer_or_encoder: Any,
+    model: torch.nn.Module | None,
     args: argparse.Namespace,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     prompt_vectors: list[np.ndarray] = []
@@ -200,6 +301,20 @@ def encode_prompts(
     with torch.inference_mode():
         for start in range(0, len(prompts), args.batch_size):
             batch = prompts[start : start + args.batch_size]
+            if backend == "wan":
+                contexts = tokenizer_or_encoder.encode(batch)
+                for valid in contexts:
+                    valid = valid.float()
+                    valid_lengths.append(int(valid.shape[0]))
+                    prompt_vectors.append(valid.mean(dim=0).cpu().numpy())
+                    near_zero_rates.append(float((valid.abs() < args.near_zero_eps).float().mean().item()))
+                    if token_budget > 0:
+                        take = min(token_budget, int(valid.shape[0]))
+                        token_chunks.append(valid[:take].cpu().numpy())
+                        token_budget -= take
+                continue
+
+            tokenizer = tokenizer_or_encoder
             encoded = tokenizer(
                 batch,
                 padding="max_length",
@@ -209,6 +324,8 @@ def encode_prompts(
             )
             input_ids = encoded["input_ids"].to(args.device)
             attention_mask = encoded["attention_mask"].to(args.device)
+            if model is None:
+                raise ValueError("HuggingFace backend requires a model.")
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
             hidden = outputs.last_hidden_state.float()
             mask = attention_mask.bool()
@@ -311,6 +428,7 @@ def write_report(path: Path, result: dict[str, Any]) -> None:
         "# Wan2.2 Text-Space Dimensionality Analysis",
         "",
         "## Encoder",
+        f"- Backend: `{result.get('encoder_backend', 'unknown')}`",
         f"- Text encoder: `{result['text_encoder']}`",
         f"- Raw embedding dim: {result['embedding_stats']['embedding_dim']}",
         f"- Prompt count: {result['embedding_stats']['prompt_count']}",
@@ -386,10 +504,13 @@ def main() -> None:
     ensure_dir(args.output_dir)
     prompts = load_prompts(args)
     text_encoder = resolve_text_encoder(args.text_encoder)
-    tokenizer, model = load_text_model(text_encoder, args)
-    prompt_matrix, token_matrix, embedding_stats = encode_prompts(prompts, tokenizer, model, args)
+    backend, tokenizer_or_encoder, model = load_text_model(text_encoder, args)
+    prompt_matrix, token_matrix, embedding_stats = encode_prompts(
+        prompts, backend, tokenizer_or_encoder, model, args
+    )
 
     result = {
+        "encoder_backend": backend,
         "text_encoder": text_encoder,
         "embedding_stats": embedding_stats,
         "prompt_pca": pca_stats(prompt_matrix, args.dims, args.thresholds),
