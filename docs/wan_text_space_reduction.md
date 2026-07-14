@@ -19,6 +19,16 @@ The first check is therefore:
 
 ## Run
 
+Generate a larger prompt corpus first if the benchmark prompts are too few:
+
+```bash
+python scripts/generate_prompt_corpus.py \
+  --count 1200 \
+  --seed 20260714 \
+  --output-jsonl outputs/text_space/prompt_corpus/wan_prompt_corpus.jsonl \
+  --output-txt outputs/text_space/prompt_corpus/wan_prompt_corpus.txt
+```
+
 Use the Wan environment because it already has torch and transformers installed:
 
 ```bash
@@ -30,6 +40,7 @@ conda activate wan22
 python scripts/analyze_wan_text_space.py \
   --text-encoder google/umt5-xxl \
   --tasks configs/ms_eval_tasks.yaml \
+  --prompt-file outputs/text_space/prompt_corpus/wan_prompt_corpus.jsonl \
   --manifest outputs/ms_eval/metrics/generation_manifest.jsonl \
   --batch-size 1 \
   --device cuda \
@@ -146,4 +157,3 @@ Phase 4: Deployment
   prompt-level vectors and leave generation untouched.
 - If generation should consume compressed text states, add a trained
   decompressor `k -> 4096` and keep the Wan transformer interface unchanged.
-
