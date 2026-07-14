@@ -122,6 +122,17 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=ROOT / "outputs" / "text_space" / "wan2_2_ti2v_5b",
     )
+    parser.add_argument(
+        "--save-token-pca",
+        action="store_true",
+        help="Save token-level PCA mean/components for generation ablation.",
+    )
+    parser.add_argument(
+        "--pca-max-dim",
+        type=int,
+        default=2048,
+        help="Maximum number of PCA components to save when --save-token-pca is set.",
+    )
     return parser.parse_args()
 
 
@@ -413,6 +424,35 @@ def pca_stats(matrix: np.ndarray, dims: list[int], thresholds: list[float]) -> d
     }
 
 
+def save_pca_projector(matrix: np.ndarray, max_dim: int, output_path: Path) -> dict[str, Any]:
+    if matrix.shape[0] < 2:
+        raise ValueError("Need at least two vectors to fit PCA projector.")
+    centered = matrix - matrix.mean(axis=0, keepdims=True)
+    _, singular_values, vt = np.linalg.svd(centered, full_matrices=False)
+    eigenvalues = (singular_values**2) / max(matrix.shape[0] - 1, 1)
+    total = float(eigenvalues.sum())
+    explained = eigenvalues / total if total > 0 else np.zeros_like(eigenvalues)
+    cumulative = np.cumsum(explained)
+    keep = min(max_dim, vt.shape[0])
+    ensure_dir(output_path.parent)
+    np.savez_compressed(
+        output_path,
+        mean=matrix.mean(axis=0).astype(np.float32),
+        components=vt[:keep].astype(np.float32),
+        explained_variance=explained[:keep].astype(np.float32),
+        cumulative_explained_variance=cumulative[:keep].astype(np.float32),
+        sample_count=np.array([matrix.shape[0]], dtype=np.int64),
+        raw_dim=np.array([matrix.shape[1]], dtype=np.int64),
+    )
+    return {
+        "path": str(output_path),
+        "components_saved": int(keep),
+        "sample_count": int(matrix.shape[0]),
+        "raw_dim": int(matrix.shape[1]),
+        "explained_at_saved_dim": float(cumulative[keep - 1]) if keep > 0 else 0.0,
+    }
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     ensure_dir(path.parent)
     if not rows:
@@ -516,6 +556,12 @@ def main() -> None:
         "prompt_pca": pca_stats(prompt_matrix, args.dims, args.thresholds),
         "token_pca": pca_stats(token_matrix, args.dims, args.thresholds),
     }
+    if args.save_token_pca:
+        result["token_pca_projector"] = save_pca_projector(
+            token_matrix,
+            args.pca_max_dim,
+            args.output_dir / "token_pca_projector.npz",
+        )
     with (args.output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2, ensure_ascii=True)
         handle.write("\n")

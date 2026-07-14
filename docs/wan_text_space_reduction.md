@@ -47,6 +47,8 @@ python scripts/analyze_wan_text_space.py \
   --batch-size 1 \
   --device cuda \
   --dtype bf16 \
+  --save-token-pca \
+  --pca-max-dim 2048 \
   --output-dir outputs/text_space/wan2_2_ti2v_5b
 ```
 
@@ -154,6 +156,79 @@ Accept a dimension only if:
 - subject presence/count does not collapse;
 - spatial relation and motion do not degrade disproportionately;
 - manual review confirms the same main subjects and layout.
+
+## Generation Ablation With PCA Reconstruction
+
+After running the analysis command with `--save-token-pca`, use the saved
+projector:
+
+```text
+outputs/text_space/wan2_2_ti2v_5b/token_pca_projector.npz
+```
+
+The wrapper below runs Wan's original `generate.py`, but patches the native T5
+encoder output at runtime:
+
+```text
+4096 -> k -> 4096
+```
+
+Run a baseline through the same wrapper:
+
+```bash
+conda activate wan22
+cd "$MS_BENCHMARK_ROOT"
+
+python scripts/adapters/wan_projected_generate.py \
+  --wan-repo "$MS_MODELS_ROOT/Wan2.2" \
+  --projector outputs/text_space/wan2_2_ti2v_5b/token_pca_projector.npz \
+  --project-dim 1024 \
+  --disable-projection \
+  -- \
+  --task ti2v-5B \
+  --size "1280*704" \
+  --ckpt_dir "$MS_MODELS_ROOT/Wan2.2/Wan2.2-TI2V-5B" \
+  --offload_model True \
+  --convert_model_dtype \
+  --t5_cpu \
+  --base_seed 0 \
+  --prompt "A realistic dog walks beside a stationary car on an outdoor street." \
+  --save_file "$MS_MODELS_ROOT/Wan2.2/outputs/pca_baseline_seed0.mp4"
+```
+
+Run a projected version:
+
+```bash
+python scripts/adapters/wan_projected_generate.py \
+  --wan-repo "$MS_MODELS_ROOT/Wan2.2" \
+  --projector outputs/text_space/wan2_2_ti2v_5b/token_pca_projector.npz \
+  --project-dim 1024 \
+  --report-error \
+  -- \
+  --task ti2v-5B \
+  --size "1280*704" \
+  --ckpt_dir "$MS_MODELS_ROOT/Wan2.2/Wan2.2-TI2V-5B" \
+  --offload_model True \
+  --convert_model_dtype \
+  --t5_cpu \
+  --base_seed 0 \
+  --prompt "A realistic dog walks beside a stationary car on an outdoor street." \
+  --save_file "$MS_MODELS_ROOT/Wan2.2/outputs/pca_1024_seed0.mp4"
+```
+
+Recommended first pass:
+
+```text
+k = 1536, 1024, 768
+```
+
+Only test `512` after `768` is acceptable, because token-level PCA retained
+about 91 percent variance at 512 in the initial run.
+
+To benchmark projected Wan outputs, add a temporary model entry whose
+`command_template` calls `scripts/adapters/wan_projected_generate.py` with the
+desired `--project-dim`. Keep the original Wan entry enabled as the baseline and
+compare MS-VGS over the same tasks/seeds.
 
 ## Landing Plan
 
