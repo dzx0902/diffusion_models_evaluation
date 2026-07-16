@@ -44,6 +44,19 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         action="store_true",
         help="Print per-prompt reconstruction MSE/cosine diagnostics.",
     )
+    parser.add_argument(
+        "--gpu-resident-models",
+        action="store_true",
+        help=(
+            "Keep Wan's T5 and both DiT submodels on GPU. Requires substantial VRAM "
+            "and must be paired with --offload_model False after --."
+        ),
+    )
+    parser.add_argument(
+        "--enable-tf32",
+        action="store_true",
+        help="Enable TF32 for remaining FP32 CUDA matmuls and cuDNN operations.",
+    )
     args, remaining = parser.parse_known_args()
     if remaining and remaining[0] == "--":
         remaining = remaining[1:]
@@ -140,6 +153,33 @@ def patch_wan_t5(projector: PcaProjector | None, token_count: int, report_error:
     T5EncoderModel.__call__ = patched_call
 
 
+def enable_gpu_resident_wan_models() -> None:
+    """Disable the upstream CPU-first placement used by the low-VRAM path."""
+
+    import wan
+
+    patched_classes = []
+    for class_name in ("WanT2V", "WanTI2V", "WanI2V"):
+        pipeline_class = getattr(wan, class_name, None)
+        if pipeline_class is None:
+            continue
+        original_init = pipeline_class.__init__
+
+        def resident_init(self, *args, __original_init=original_init, **kwargs):  # type: ignore[no-untyped-def]
+            kwargs["init_on_cpu"] = False
+            __original_init(self, *args, **kwargs)
+
+        pipeline_class.__init__ = resident_init
+        patched_classes.append(class_name)
+
+    if not patched_classes:
+        raise RuntimeError("Could not find Wan pipeline classes to enable GPU-resident mode.")
+    print(
+        "[wan-projector] GPU-resident mode enabled for " + ", ".join(patched_classes),
+        flush=True,
+    )
+
+
 def main() -> None:
     args, wan_args = parse_args()
     repo = args.wan_repo.resolve()
@@ -148,6 +188,15 @@ def main() -> None:
         raise FileNotFoundError(generate_py)
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
+
+    if args.enable_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+        print("[wan-projector] TF32 enabled for FP32 CUDA operations", flush=True)
+
+    if args.gpu_resident_models:
+        enable_gpu_resident_wan_models()
 
     use_feature_projection = not args.disable_projection and args.project_dim > 0
     use_token_projection = args.token_count > 0

@@ -159,6 +159,52 @@ Accept a dimension only if:
 
 ## Generation Ablation With PCA Reconstruction
 
+### 48GB GPU high-throughput mode
+
+For a 48GB RTX 4090D, keep the text encoder and both Wan TI2V DiT submodels resident
+on the GPU. This avoids the CPU/GPU model transfers used by the conservative low-VRAM
+configuration. `run_wan_pca_ablation.py` enables this mode by default and passes
+`--offload_model False`; it also enables TF32 only for remaining FP32 operations.
+The batch runner defaults to `--frame-num 65`, which exactly matches the benchmark's
+4-second, 16-fps task duration and is about 20% less denoising work than 81 frames.
+It keeps Wan's configured sampling-step count unless `--sample-steps` is explicitly set.
+
+Before committing to a long run, test one representative video and monitor peak VRAM:
+
+```bash
+conda activate wan22
+cd "$MS_BENCHMARK_ROOT"
+
+python scripts/run_wan_pca_ablation.py \
+  --task-ids dog_car_walk_static \
+  --seeds 0 \
+  --variants baseline \
+  --output-root outputs/wan_high_vram_smoke \
+  --generate-only
+
+nvidia-smi
+```
+
+Keep the default `--gpu-resident-models` only if this finishes without OOM. For the
+previous low-VRAM behavior, add `--no-gpu-resident-models --no-enable-tf32`.
+
+For the complete generation-and-YOLO run, launch the controller from `wan22` and
+explicitly point evaluation to the separate benchmark environment:
+
+```bash
+conda activate wan22
+cd "$MS_BENCHMARK_ROOT"
+EVAL_PY="$(conda run -n ms-video-eval python -c 'import sys; print(sys.executable)')"
+
+python scripts/run_wan_pca_ablation.py \
+  --preset full \
+  --output-root outputs/wan_text_compression_full \
+  --eval-python "$EVAL_PY" \
+  --settings "$MS_BENCHMARK_ROOT/configs/ms_eval_settings.wsl.yaml" \
+  --report-error \
+  --skip-existing
+```
+
 After running the analysis command with `--save-token-pca`, use the saved
 projector:
 
