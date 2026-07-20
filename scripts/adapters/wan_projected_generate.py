@@ -20,6 +20,14 @@ import torch
 import torch.nn.functional as F
 
 
+ROOT = Path(__file__).resolve().parents[2]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from ms_video_eval.wan_fixed_latent import load_fixed_latent_checkpoint, reconstruction_stats
+
+
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(
         description="Wrap Wan generate.py with text-condition reconstruction.",
@@ -28,6 +36,18 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--wan-repo", type=Path, required=True)
     parser.add_argument("--projector", type=Path, default=None)
     parser.add_argument("--project-dim", type=int, default=0)
+    parser.add_argument(
+        "--fixed-latent-checkpoint",
+        type=Path,
+        default=None,
+        help="Checkpoint from train_wan_fixed_latent.py.",
+    )
+    parser.add_argument(
+        "--fixed-latent-slots",
+        type=int,
+        default=0,
+        help="Use the first K nested learned slots from --fixed-latent-checkpoint.",
+    )
     parser.add_argument(
         "--token-count",
         type=int,
@@ -121,7 +141,13 @@ def token_resample_reconstruct(hidden: torch.Tensor, token_count: int) -> tuple[
     }
 
 
-def patch_wan_t5(projector: PcaProjector | None, token_count: int, report_error: bool) -> None:
+def patch_wan_t5(
+    projector: PcaProjector | None,
+    fixed_latent,
+    fixed_slots: int,
+    token_count: int,
+    report_error: bool,
+) -> None:  # type: ignore[no-untyped-def]
     from wan.modules.t5 import T5EncoderModel
 
     original_call = T5EncoderModel.__call__
@@ -134,13 +160,18 @@ def patch_wan_t5(projector: PcaProjector | None, token_count: int, report_error:
             stats: dict[str, float] = {}
             if projector is not None:
                 recon, stats = projector.reconstruct(recon)
+            if fixed_latent is not None:
+                with torch.inference_mode():
+                    reconstructed, _ = fixed_latent(recon.float().unsqueeze(0), fixed_slots)
+                recon = reconstructed.squeeze(0).to(dtype=context.dtype)
+                stats = reconstruction_stats(context, recon)
             token_stats: dict[str, float] = {}
             if token_count > 0:
                 recon, token_stats = token_resample_reconstruct(recon, token_count)
             if report_error:
                 dim_text = projector.dim if projector is not None else 0
                 print(
-                    f"[wan-projector] text_index={idx} dim={dim_text} token_count={token_count} "
+                    f"[wan-projector] text_index={idx} dim={dim_text} fixed_slots={fixed_slots} token_count={token_count} "
                     f"mse={stats.get('mse', 0.0):.6e} cosine={stats.get('cosine', 1.0):.6f} "
                     f"token_mse={token_stats.get('token_mse', 0.0):.6e} "
                     f"token_cosine={token_stats.get('token_cosine', 1.0):.6f} "
@@ -200,6 +231,12 @@ def main() -> None:
 
     use_feature_projection = not args.disable_projection and args.project_dim > 0
     use_token_projection = args.token_count > 0
+    use_fixed_latent = args.fixed_latent_checkpoint is not None or args.fixed_latent_slots > 0
+
+    if use_fixed_latent and (use_feature_projection or use_token_projection):
+        raise ValueError("Fixed latent mode cannot be combined with PCA or token interpolation.")
+    if use_fixed_latent and (args.fixed_latent_checkpoint is None or args.fixed_latent_slots <= 0):
+        raise ValueError("Fixed latent mode requires both --fixed-latent-checkpoint and --fixed-latent-slots.")
 
     if use_feature_projection:
         if args.projector is None:
@@ -208,10 +245,16 @@ def main() -> None:
     else:
         projector = None
 
-    if use_feature_projection or use_token_projection:
-        patch_wan_t5(projector, args.token_count, args.report_error)
+    if use_fixed_latent:
+        fixed_latent = load_fixed_latent_checkpoint(args.fixed_latent_checkpoint, torch.device("cuda"))
+    else:
+        fixed_latent = None
+
+    if use_feature_projection or use_token_projection or use_fixed_latent:
+        patch_wan_t5(projector, fixed_latent, args.fixed_latent_slots, args.token_count, args.report_error)
         print(
             f"[wan-projector] enabled projector={args.projector} dim={args.project_dim} "
+            f"fixed_latent={args.fixed_latent_checkpoint} slots={args.fixed_latent_slots} "
             f"token_count={args.token_count}",
             flush=True,
         )

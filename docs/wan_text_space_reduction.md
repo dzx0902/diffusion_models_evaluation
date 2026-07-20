@@ -280,6 +280,56 @@ compare MS-VGS over the same tasks/seeds.
 
 ## Landing Plan
 
+## Fixed Latent Resampler
+
+The PCA and `tK` interpolation experiments show that feature reduction is viable but
+variable token-count interpolation is not a stable target space. The fixed-latent
+workflow trains a nested query-resampler instead:
+
+```text
+Wan T5 [N,4096] -> fixed latent Z[128,512] -> positional decoder -> Wan T5 [N,4096]
+```
+
+`z68` is a prefix of `z72`: both share the first 68 learned slots. This makes slot
+count ablations meaningful, unlike independently interpolated `t68` and `t72`.
+
+Cache only the held-out prompt corpus, not the benchmark task prompts:
+
+```bash
+conda activate wan22
+cd "$MS_BENCHMARK_ROOT"
+
+python scripts/cache_wan_text_states.py \
+  --prompt-file outputs/text_space/prompt_corpus/wan_prompt_corpus.jsonl \
+  --wan-repo "$MS_MODELS_ROOT/Wan2.2" \
+  --wan-checkpoint-dir "$MS_MODELS_ROOT/Wan2.2/Wan2.2-TI2V-5B" \
+  --output-dir outputs/fixed_latent/cache \
+  --skip-existing
+
+python scripts/train_wan_fixed_latent.py \
+  --cache-dir outputs/fixed_latent/cache \
+  --output-dir outputs/fixed_latent/wan_128x512 \
+  --max-slots 128 \
+  --slot-counts 64 68 72 96 128
+```
+
+First smoke-test the learned reconstruction, then evaluate it with the existing YOLO
+pipeline. `zK` means use the first K fixed learned slots:
+
+```bash
+python scripts/run_wan_pca_ablation.py \
+  --preset pilot \
+  --variants z128 \
+  --fixed-latent-checkpoint outputs/fixed_latent/wan_128x512/best.pt \
+  --output-root outputs/wan_fixed_latent_smoke \
+  --eval-python /home/dzxy/miniconda3/envs/ms-video-eval/bin/python \
+  --settings "$MS_BENCHMARK_ROOT/configs/ms_eval_settings.wsl.yaml" \
+  --skip-existing
+```
+
+Only after `z128` is close to baseline should you compare `z96 z72 z68` over the
+same tasks and seeds.
+
 Phase 1: Measurement
 
 - Run `scripts/analyze_wan_text_space.py` on benchmark prompts and real user prompts.

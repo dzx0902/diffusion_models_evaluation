@@ -102,6 +102,12 @@ def parse_args() -> argparse.Namespace:
         default=ROOT / "outputs" / "text_space" / "wan2_2_ti2v_5b" / "token_pca_projector.npz",
     )
     parser.add_argument(
+        "--fixed-latent-checkpoint",
+        type=Path,
+        default=ROOT / "outputs" / "fixed_latent" / "wan_128x512" / "best.pt",
+        help="Checkpoint used by zK variants, produced by train_wan_fixed_latent.py.",
+    )
+    parser.add_argument(
         "--wan-python",
         type=Path,
         default=Path(sys.executable),
@@ -191,19 +197,24 @@ def validate_python_executable(label: str, path: Path) -> None:
         raise ValueError(f"--{label} must be an executable Python file, got: {path}")
 
 
-def parse_variant(variant: str) -> tuple[int, int]:
+def parse_variant(variant: str) -> tuple[int, int, int]:
     if variant == "baseline":
-        return 0, 0
+        return 0, 0, 0
     dim = 0
     token_count = 0
+    fixed_slots = 0
     for part in variant.split("_"):
         if match := re.fullmatch(r"d(\d+)", part):
             dim = int(match.group(1))
         elif match := re.fullmatch(r"t(\d+)", part):
             token_count = int(match.group(1))
+        elif match := re.fullmatch(r"z(\d+)", part):
+            fixed_slots = int(match.group(1))
         else:
             raise ValueError(f"Unsupported variant part: {part!r} in {variant!r}")
-    return dim, token_count
+    if fixed_slots and (dim or token_count):
+        raise ValueError(f"Fixed latent variants cannot combine d/t parts: {variant!r}")
+    return dim, token_count, fixed_slots
 
 
 def model_id(variant: str) -> str:
@@ -256,12 +267,13 @@ def generate(args: argparse.Namespace) -> None:
     wan_repo = expand_path(args.wan_repo)
     ckpt_dir = expand_path(args.ckpt_dir)
     projector = expand_path(args.projector)
+    fixed_latent_checkpoint = expand_path(args.fixed_latent_checkpoint)
 
     for task in tasks:
         prompt = build_prompt(task)
         for seed in args.seeds:
             for variant in args.variants:
-                dim, token_count = parse_variant(variant)
+                dim, token_count, fixed_slots = parse_variant(variant)
                 output_path = videos_root / model_id(variant) / f"{task.id}_seed{seed}.mp4"
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 if args.skip_existing and output_path.exists():
@@ -278,7 +290,16 @@ def generate(args: argparse.Namespace) -> None:
                     wrapper_args.append("--gpu-resident-models")
                 if args.enable_tf32:
                     wrapper_args.append("--enable-tf32")
-                if dim > 0:
+                if fixed_slots > 0:
+                    wrapper_args.extend(
+                        [
+                            "--fixed-latent-checkpoint",
+                            str(fixed_latent_checkpoint),
+                            "--fixed-latent-slots",
+                            str(fixed_slots),
+                        ]
+                    )
+                elif dim > 0:
                     wrapper_args.extend(["--projector", str(projector), "--project-dim", str(dim)])
                 else:
                     wrapper_args.append("--disable-projection")
@@ -370,6 +391,7 @@ def main() -> None:
     args.output_root = expand_path(args.output_root)
     args.wan_python = expand_path(args.wan_python)
     args.eval_python = expand_path(args.eval_python)
+    args.fixed_latent_checkpoint = expand_path(args.fixed_latent_checkpoint)
     if args.generate_only and args.evaluate_only:
         raise ValueError("--generate-only and --evaluate-only cannot be used together.")
     if args.dry_run and args.evaluate_only:
