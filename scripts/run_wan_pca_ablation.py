@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -174,6 +175,20 @@ def expand_path(path: Path) -> Path:
     for key, value in replacements.items():
         text = text.replace(key, value)
     return Path(text).expanduser()
+
+
+def validate_python_executable(label: str, path: Path) -> None:
+    """Reject an unset shell variable before subprocess reports a cryptic error."""
+
+    if path.resolve() == Path.cwd().resolve():
+        raise ValueError(
+            f"--{label} resolved to the current directory ({path}). "
+            "This usually means an empty shell variable was passed. "
+            "Pass an absolute Python path, for example "
+            "--eval-python /home/dzxy/miniconda3/envs/ms-video-eval/bin/python."
+        )
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError(f"--{label} must be an executable Python file, got: {path}")
 
 
 def parse_variant(variant: str) -> tuple[int, int]:
@@ -359,6 +374,10 @@ def main() -> None:
         raise ValueError("--generate-only and --evaluate-only cannot be used together.")
     if args.dry_run and args.evaluate_only:
         raise ValueError("--dry-run cannot be combined with --evaluate-only.")
+    if not args.evaluate_only and not args.dry_run:
+        validate_python_executable("wan-python", args.wan_python)
+    if not args.generate_only and not args.dry_run:
+        validate_python_executable("eval-python", args.eval_python)
     if not args.evaluate_only:
         generate(args)
     if args.dry_run:

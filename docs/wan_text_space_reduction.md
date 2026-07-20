@@ -194,7 +194,9 @@ explicitly point evaluation to the separate benchmark environment:
 ```bash
 conda activate wan22
 cd "$MS_BENCHMARK_ROOT"
-EVAL_PY="$(conda run -n ms-video-eval python -c 'import sys; print(sys.executable)')"
+# Set this once per shell. Do not leave EVAL_PY unset: an empty value resolves to '.'.
+export EVAL_PY=/home/dzxy/miniconda3/envs/ms-video-eval/bin/python
+"$EVAL_PY" --version
 
 python scripts/run_wan_pca_ablation.py \
   --preset full \
