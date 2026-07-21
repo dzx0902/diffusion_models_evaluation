@@ -37,6 +37,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--projector", type=Path, default=None)
     parser.add_argument("--project-dim", type=int, default=0)
     parser.add_argument(
+        "--fixed-pca-slots",
+        type=int,
+        default=0,
+        help="Pad PCA token features to this fixed slot count before decoding back to Wan states.",
+    )
+    parser.add_argument(
         "--fixed-latent-checkpoint",
         type=Path,
         default=None,
@@ -118,6 +124,26 @@ class PcaProjector:
         cosine = float(((x * recon).sum(dim=-1) / denom.clamp_min(1e-8)).mean().detach().cpu().item())
         return recon.to(dtype=original_dtype), {"mse": mse, "cosine": cosine}
 
+    def fixed_slot_reconstruct(self, hidden: torch.Tensor, slots: int) -> tuple[torch.Tensor, dict[str, float]]:
+        """Round-trip through a fixed [slots, dim] latent with zero padding."""
+
+        if hidden.shape[0] > slots:
+            raise ValueError(
+                f"Prompt has {hidden.shape[0]} valid tokens, exceeding fixed PCA slots={slots}."
+            )
+        original_dtype = hidden.dtype
+        mean, components = self.tensors_for(hidden.device, hidden.dtype)
+        x = hidden.float()
+        low = (x - mean) @ components.t()
+        fixed = torch.zeros(slots, self.dim, device=low.device, dtype=low.dtype)
+        fixed[: low.shape[0]] = low
+        recon = fixed[: low.shape[0]] @ components + mean
+        diff = recon - x
+        mse = float(diff.pow(2).mean().detach().cpu().item())
+        denom = torch.linalg.norm(x, dim=-1) * torch.linalg.norm(recon, dim=-1)
+        cosine = float(((x * recon).sum(dim=-1) / denom.clamp_min(1e-8)).mean().detach().cpu().item())
+        return recon.to(dtype=original_dtype), {"mse": mse, "cosine": cosine}
+
 
 def token_resample_reconstruct(hidden: torch.Tensor, token_count: int) -> tuple[torch.Tensor, dict[str, float]]:
     if token_count <= 0 or hidden.shape[0] <= token_count:
@@ -143,6 +169,7 @@ def token_resample_reconstruct(hidden: torch.Tensor, token_count: int) -> tuple[
 
 def patch_wan_t5(
     projector: PcaProjector | None,
+    fixed_pca_slots: int,
     fixed_latent,
     fixed_slots: int,
     token_count: int,
@@ -159,7 +186,10 @@ def patch_wan_t5(
             recon = context
             stats: dict[str, float] = {}
             if projector is not None:
-                recon, stats = projector.reconstruct(recon)
+                if fixed_pca_slots > 0:
+                    recon, stats = projector.fixed_slot_reconstruct(recon, fixed_pca_slots)
+                else:
+                    recon, stats = projector.reconstruct(recon)
             if fixed_latent is not None:
                 with torch.inference_mode():
                     reconstructed, _ = fixed_latent(recon.float().unsqueeze(0), fixed_slots)
@@ -171,7 +201,7 @@ def patch_wan_t5(
             if report_error:
                 dim_text = projector.dim if projector is not None else 0
                 print(
-                    f"[wan-projector] text_index={idx} dim={dim_text} fixed_slots={fixed_slots} token_count={token_count} "
+                    f"[wan-projector] text_index={idx} dim={dim_text} fixed_pca_slots={fixed_pca_slots} fixed_slots={fixed_slots} token_count={token_count} "
                     f"mse={stats.get('mse', 0.0):.6e} cosine={stats.get('cosine', 1.0):.6f} "
                     f"token_mse={token_stats.get('token_mse', 0.0):.6e} "
                     f"token_cosine={token_stats.get('token_cosine', 1.0):.6f} "
@@ -232,11 +262,14 @@ def main() -> None:
     use_feature_projection = not args.disable_projection and args.project_dim > 0
     use_token_projection = args.token_count > 0
     use_fixed_latent = args.fixed_latent_checkpoint is not None or args.fixed_latent_slots > 0
+    use_fixed_pca = args.fixed_pca_slots > 0
 
-    if use_fixed_latent and (use_feature_projection or use_token_projection):
-        raise ValueError("Fixed latent mode cannot be combined with PCA or token interpolation.")
+    if use_fixed_latent and (use_feature_projection or use_token_projection or use_fixed_pca):
+        raise ValueError("Learned fixed latent mode cannot be combined with PCA or token interpolation.")
     if use_fixed_latent and (args.fixed_latent_checkpoint is None or args.fixed_latent_slots <= 0):
         raise ValueError("Fixed latent mode requires both --fixed-latent-checkpoint and --fixed-latent-slots.")
+    if use_fixed_pca and not use_feature_projection:
+        raise ValueError("--fixed-pca-slots requires --projector and --project-dim.")
 
     if use_feature_projection:
         if args.projector is None:
@@ -251,10 +284,17 @@ def main() -> None:
         fixed_latent = None
 
     if use_feature_projection or use_token_projection or use_fixed_latent:
-        patch_wan_t5(projector, fixed_latent, args.fixed_latent_slots, args.token_count, args.report_error)
+        patch_wan_t5(
+            projector,
+            args.fixed_pca_slots,
+            fixed_latent,
+            args.fixed_latent_slots,
+            args.token_count,
+            args.report_error,
+        )
         print(
             f"[wan-projector] enabled projector={args.projector} dim={args.project_dim} "
-            f"fixed_latent={args.fixed_latent_checkpoint} slots={args.fixed_latent_slots} "
+            f"fixed_pca_slots={args.fixed_pca_slots} fixed_latent={args.fixed_latent_checkpoint} slots={args.fixed_latent_slots} "
             f"token_count={args.token_count}",
             flush=True,
         )

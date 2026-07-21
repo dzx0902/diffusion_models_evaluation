@@ -330,6 +330,37 @@ python scripts/run_wan_pca_ablation.py \
 Only after `z128` is close to baseline should you compare `z96 z72 z68` over the
 same tasks and seeds.
 
+### Stable PCA-padded baseline
+
+For the current corpus, all native Wan text states have at most 94 valid tokens. A
+fixed `p128` latent therefore needs no learned token resampling: apply the validated
+4096-to-512 PCA per valid token, zero-pad to `[128,512]`, then remove padding and
+apply the PCA inverse before calling Wan. This is the stable target-space baseline;
+it should retain the generation behavior of `d512` while exposing a fixed tensor to
+an external alignment model.
+
+Export the actual fixed latent tensors for that external model:
+
+```bash
+python scripts/export_wan_fixed_pca_latents.py \
+  --cache-dir outputs/fixed_latent/cache \
+  --projector outputs/text_space/wan2_2_ti2v_5b/token_pca_projector.npz \
+  --slots 128 \
+  --dim 512 \
+  --output-dir outputs/fixed_latent/pca_128x512 \
+  --skip-existing
+```
+
+```bash
+python scripts/run_wan_pca_ablation.py \
+  --preset pilot \
+  --variants p128 \
+  --output-root outputs/wan_fixed_pca_smoke \
+  --eval-python /home/dzxy/miniconda3/envs/ms-video-eval/bin/python \
+  --settings "$MS_BENCHMARK_ROOT/configs/ms_eval_settings.wsl.yaml" \
+  --skip-existing
+```
+
 Phase 1: Measurement
 
 - Run `scripts/analyze_wan_text_space.py` on benchmark prompts and real user prompts.

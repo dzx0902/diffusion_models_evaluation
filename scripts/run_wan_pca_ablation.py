@@ -108,6 +108,12 @@ def parse_args() -> argparse.Namespace:
         help="Checkpoint used by zK variants, produced by train_wan_fixed_latent.py.",
     )
     parser.add_argument(
+        "--fixed-pca-dim",
+        type=int,
+        default=512,
+        help="Feature dimension for pK fixed-slot PCA variants.",
+    )
+    parser.add_argument(
         "--wan-python",
         type=Path,
         default=Path(sys.executable),
@@ -197,12 +203,13 @@ def validate_python_executable(label: str, path: Path) -> None:
         raise ValueError(f"--{label} must be an executable Python file, got: {path}")
 
 
-def parse_variant(variant: str) -> tuple[int, int, int]:
+def parse_variant(variant: str) -> tuple[int, int, int, int]:
     if variant == "baseline":
-        return 0, 0, 0
+        return 0, 0, 0, 0
     dim = 0
     token_count = 0
     fixed_slots = 0
+    fixed_pca_slots = 0
     for part in variant.split("_"):
         if match := re.fullmatch(r"d(\d+)", part):
             dim = int(match.group(1))
@@ -210,11 +217,15 @@ def parse_variant(variant: str) -> tuple[int, int, int]:
             token_count = int(match.group(1))
         elif match := re.fullmatch(r"z(\d+)", part):
             fixed_slots = int(match.group(1))
+        elif match := re.fullmatch(r"p(\d+)", part):
+            fixed_pca_slots = int(match.group(1))
         else:
             raise ValueError(f"Unsupported variant part: {part!r} in {variant!r}")
-    if fixed_slots and (dim or token_count):
-        raise ValueError(f"Fixed latent variants cannot combine d/t parts: {variant!r}")
-    return dim, token_count, fixed_slots
+    if fixed_slots and (dim or token_count or fixed_pca_slots):
+        raise ValueError(f"Learned fixed latent variants cannot combine d/t/p parts: {variant!r}")
+    if fixed_pca_slots and (dim or token_count):
+        raise ValueError(f"Fixed PCA variants cannot combine d/t parts: {variant!r}")
+    return dim, token_count, fixed_slots, fixed_pca_slots
 
 
 def model_id(variant: str) -> str:
@@ -273,7 +284,7 @@ def generate(args: argparse.Namespace) -> None:
         prompt = build_prompt(task)
         for seed in args.seeds:
             for variant in args.variants:
-                dim, token_count, fixed_slots = parse_variant(variant)
+                dim, token_count, fixed_slots, fixed_pca_slots = parse_variant(variant)
                 output_path = videos_root / model_id(variant) / f"{task.id}_seed{seed}.mp4"
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 if args.skip_existing and output_path.exists():
@@ -290,7 +301,18 @@ def generate(args: argparse.Namespace) -> None:
                     wrapper_args.append("--gpu-resident-models")
                 if args.enable_tf32:
                     wrapper_args.append("--enable-tf32")
-                if fixed_slots > 0:
+                if fixed_pca_slots > 0:
+                    wrapper_args.extend(
+                        [
+                            "--projector",
+                            str(projector),
+                            "--project-dim",
+                            str(args.fixed_pca_dim),
+                            "--fixed-pca-slots",
+                            str(fixed_pca_slots),
+                        ]
+                    )
+                elif fixed_slots > 0:
                     wrapper_args.extend(
                         [
                             "--fixed-latent-checkpoint",
