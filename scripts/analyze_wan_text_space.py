@@ -175,7 +175,11 @@ def _read_prompt_file(path: Path) -> list[str]:
         raise FileNotFoundError(path)
     if path.suffix.lower() == ".jsonl":
         rows = read_jsonl(path)
-        return [str(row.get("prompt", "")).strip() for row in rows if row.get("prompt")]
+        return [
+            str(row.get("prompt") or row.get("caption") or "").strip()
+            for row in rows
+            if row.get("prompt") or row.get("caption")
+        ]
     with path.open("r", encoding="utf-8") as handle:
         return [line.strip() for line in handle if line.strip()]
 
