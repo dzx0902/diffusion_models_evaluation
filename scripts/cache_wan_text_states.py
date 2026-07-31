@@ -34,7 +34,9 @@ def parse_args() -> argparse.Namespace:
 
 def read_prompts(path: Path) -> list[str]:
     if path.suffix.lower() == ".jsonl":
-        prompts = [str(row.get("prompt", "")).strip() for row in read_jsonl(path)]
+        # EEG video manifests use ``caption`` while benchmark manifests use
+        # ``prompt``. Both denote the exact text passed to Wan's T5 encoder.
+        prompts = [str(row.get("prompt") or row.get("caption") or "").strip() for row in read_jsonl(path)]
     else:
         prompts = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
     return list(dict.fromkeys(prompt for prompt in prompts if prompt))

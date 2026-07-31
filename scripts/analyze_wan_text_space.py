@@ -42,6 +42,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional txt/jsonl file. txt uses one prompt per line; jsonl reads the 'prompt' field.",
     )
     parser.add_argument(
+        "--only-prompt-file",
+        action="store_true",
+        help="Fit/analyze using only --prompt-file; do not merge benchmark tasks or generation manifests.",
+    )
+    parser.add_argument(
         "--manifest",
         type=Path,
         default=ROOT / "outputs" / "ms_eval" / "metrics" / "generation_manifest.jsonl",
@@ -177,11 +182,11 @@ def _read_prompt_file(path: Path) -> list[str]:
 
 def load_prompts(args: argparse.Namespace) -> list[str]:
     prompts: list[str] = []
-    if args.tasks.exists():
+    if not args.only_prompt_file and args.tasks.exists():
         prompts.extend(build_prompt(task) for task in load_tasks(args.tasks))
     if args.prompt_file:
         prompts.extend(_read_prompt_file(args.prompt_file))
-    if args.manifest.exists():
+    if not args.only_prompt_file and args.manifest.exists():
         prompts.extend(str(row.get("prompt", "")).strip() for row in read_jsonl(args.manifest))
 
     seen: set[str] = set()
