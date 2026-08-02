@@ -40,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-partition", choices=["validation", "test"], default="validation")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "outputs" / "eeg_wan" / "conditioner")
     parser.add_argument("--checkpoint", type=Path, default=None, help="Evaluate this checkpoint only; do not train.")
+    parser.add_argument("--resume", type=Path, default=None, help="Resume training from last.pt after an interruption.")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--workers", type=int, default=0)
@@ -84,6 +85,17 @@ def resolve_split(args: argparse.Namespace) -> tuple[set[str], set[str], set[str
         set(experiment["train_video_ids"]),
         set(experiment[f"{partition}_video_ids"]),
     )
+
+
+def best_history_loss(path: Path) -> float:
+    if not path.exists():
+        return float("inf")
+    values = [
+        float(json.loads(line)["valid"]["loss"])
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return min(values, default=float("inf"))
 
 
 class EEGWanDataset(Dataset):
@@ -154,6 +166,8 @@ def evaluate(model: EEGConditioner, loader: DataLoader, device: torch.device) ->
 
 def main() -> None:
     args = parse_args()
+    if args.checkpoint is not None and args.resume is not None:
+        raise ValueError("--checkpoint and --resume cannot be used together")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -205,9 +219,29 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    best = float("inf")
     history_path = args.output_dir / "history.jsonl"
-    for epoch in range(1, args.epochs + 1):
+    best = best_history_loss(history_path)
+    start_epoch = 1
+    if args.resume is not None:
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        checkpoint_config = EEGConditionerConfig(**checkpoint["config"])
+        if checkpoint_config != config:
+            raise ValueError(f"Resume configuration differs from requested configuration: {checkpoint_config} != {config}")
+        model.load_state_dict(checkpoint["state_dict"])
+        start_epoch = int(checkpoint["epoch"]) + 1
+        if "optimizer_state_dict" in checkpoint and "scheduler_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            print(f"[eeg-wan] resumed full optimizer state from epoch {start_epoch - 1}")
+        else:
+            # Compatibility with checkpoints created before resume support.
+            for _ in range(start_epoch - 1):
+                scheduler.step()
+            print(f"[eeg-wan] resumed model-only checkpoint from epoch {start_epoch - 1}")
+    if start_epoch > args.epochs:
+        print(f"[eeg-wan] checkpoint already reached epoch {start_epoch - 1}; nothing to train")
+        return
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         for batch in train_loader:
             optimizer.zero_grad(set_to_none=True)
@@ -222,7 +256,15 @@ def main() -> None:
         with history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
         print(f"[eeg-wan] epoch={epoch} valid={valid}", flush=True)
-        payload = {"config": asdict(config), "state_dict": model.state_dict(), "epoch": epoch, "valid": valid, "args": vars(args)}
+        payload = {
+            "config": asdict(config),
+            "state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "epoch": epoch,
+            "valid": valid,
+            "args": vars(args),
+        }
         torch.save(payload, args.output_dir / "last.pt")
         if valid["loss"] < best:
             best = valid["loss"]
