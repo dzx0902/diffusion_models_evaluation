@@ -21,14 +21,14 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_ENTITY_PATTERNS = {
-    "01": (r"\bperson(?:s)?\b", r"\bball(?:s)?\b"),
+    "01": (r"\b(?:person|people)\b", r"\b(?:ball|puck)s?\b"),
     "02": (r"\bdog(?:s)?\b", r"\bball(?:s)?\b"),
-    "03": (r"\bdog(?:s)?\b", r"\bcar(?:s)?\b"),
-    "04": (r"\bcar(?:s)?\b", r"\bflowers?\b"),
-    "05": (r"\bbird(?:s)?\b", r"\bflowers?\b"),
-    "06": (r"\bperson(?:s)?\b", r"\bbird(?:s)?\b"),
-    "07": (r"\bperson(?:s)?\b", r"\bdog(?:s)?\b", r"\bball(?:s)?\b"),
-    "08": (r"\bperson(?:s)?\b", r"\bbird(?:s)?\b", r"\bflowers?\b"),
+    "03": (r"\bdog(?:s)?\b", r"\b(?:car|truck|van|vehicle|suv|hatchback|pickup)s?\b"),
+    "04": (r"\b(?:car|truck|van|vehicle|suv|hatchback|pickup)s?\b", r"\b(?:flower|blossom|bloom)s?\b"),
+    "05": (r"\bbird(?:s)?\b", r"\b(?:flower|blossom|bloom)s?\b"),
+    "06": (r"\b(?:person|people)\b", r"\bbird(?:s)?\b"),
+    "07": (r"\b(?:person|people)\b", r"\bdog(?:s)?\b", r"\bball(?:s)?\b"),
+    "08": (r"\b(?:person|people)\b", r"\bbird(?:s)?\b", r"\b(?:flower|blossom|bloom)s?\b"),
 }
 CONTEXT_TERM_PATTERN = re.compile(
     r"\b(?:park|garden|yard|field|beach|street|road|sidewalk|court|gym|room|floor|"
@@ -91,7 +91,7 @@ Rules:
 4. Use only generic central nouns: person, dog, car, bird, ball, flower(s). Do not retain setting nouns such as park, road, beach, garden, court, or indoor/outdoor context.
 5. Use one or two short sentences, normally 8 to 28 English words.
 6. Categories 07 and 08 have three central entities. Caption 07 must explicitly mention person, dog, and ball; caption 08 must explicitly mention person, bird, and flower(s).
-7. Keep distinct interactions explicit. Category 07 must retain a person-ball relation and a dog-ball relation. Category 08 must retain a person-bird relation and a bird-flower relation. For example: "A person throws a ball. A dog runs after and catches the ball."
+7. Keep distinct interactions explicit. Categories 07 and 08 must retain a connected relation graph across all three central entities. Direct relations are preferred but not mandatory: person-dog plus dog-ball, or person-flower plus bird-flower, are valid when faithful to the source. For example: "A person throws a ball. A dog runs after and catches the ball."
 8. Return exactly one item for every input video_id. Do not omit, duplicate, reorder, or invent video_id values.
 9. JSON must be valid and contain no markdown."""
 
@@ -118,13 +118,23 @@ def endpoint(base_url: str) -> str:
 
 
 def request_rewrite(args: argparse.Namespace, api_key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    last_error: Exception | None = None
+    pending = {str(row["video_id"]): row for row in rows}
+    rewrites: dict[str, dict[str, Any]] = {}
+    errors: dict[str, str] = {}
+    api_model = args.model
     last_content = ""
     for attempt in range(args.retries):
+        if not pending:
+            break
+        retry_after = 0.0
         try:
             retry_instruction = ""
             if attempt:
-                retry_instruction = "\nThis is a retry. Return a complete valid JSON object only; do not truncate strings."
+                feedback = json.dumps(errors, ensure_ascii=False)
+                retry_instruction = (
+                    "\nThis is a retry for only the supplied items. Return a complete valid JSON object only. "
+                    f"Correct these validation errors: {feedback}"
+                )
             payload = {
                 "model": args.model,
                 "temperature": 0,
@@ -133,10 +143,10 @@ def request_rewrite(args: argparse.Namespace, api_key: str, rows: list[dict[str,
                 "response_format": {"type": "json_object"},
                 "messages": [
                     {"role": "system", "content": system_prompt()},
-                    {"role": "user", "content": user_prompt(rows) + retry_instruction},
+                    {"role": "user", "content": user_prompt(list(pending.values())) + retry_instruction},
                 ],
             }
-            payload["max_tokens"] = args.max_tokens * len(rows)
+            payload["max_tokens"] = args.max_tokens * len(pending)
             request = urllib.request.Request(
                 endpoint(args.base_url),
                 data=json.dumps(payload).encode("utf-8"),
@@ -155,7 +165,6 @@ def request_rewrite(args: argparse.Namespace, api_key: str, rows: list[dict[str,
             items = rewritten["items"]
             if not isinstance(items, list):
                 raise ValueError("API response items is not a list")
-            source_by_id = {str(row["video_id"]): row for row in rows}
             returned_by_id: dict[str, dict[str, Any]] = {}
             for item in items:
                 if not isinstance(item, dict) or set(item) != {"video_id", "caption", "entities", "relations"}:
@@ -164,27 +173,34 @@ def request_rewrite(args: argparse.Namespace, api_key: str, rows: list[dict[str,
                 if video_id in returned_by_id:
                     raise ValueError(f"API response duplicates video_id {video_id}")
                 returned_by_id[video_id] = item
-            if set(returned_by_id) != set(source_by_id):
-                missing = sorted(set(source_by_id) - set(returned_by_id))
-                unexpected = sorted(set(returned_by_id) - set(source_by_id))
+            if set(returned_by_id) != set(pending):
+                missing = sorted(set(pending) - set(returned_by_id))
+                unexpected = sorted(set(returned_by_id) - set(pending))
                 raise ValueError(f"API response video_id mismatch; missing={missing}, unexpected={unexpected}")
             for video_id, item in returned_by_id.items():
-                validate_rewrite(str(source_by_id[video_id]["category_id"]), item)
-            return {"rewrites": returned_by_id, "api_model": api_response.get("model", args.model)}
+                try:
+                    validate_rewrite(str(pending[video_id]["category_id"]), item)
+                except ValueError as error:
+                    errors[video_id] = str(error)
+                else:
+                    rewrites[video_id] = item
+                    del pending[video_id]
+                    errors.pop(video_id, None)
+            api_model = api_response.get("model", args.model)
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, KeyError, json.JSONDecodeError) as error:
-            last_error = error
-            if attempt + 1 == args.retries:
-                break
-            retry_after = 0.0
+            for video_id in pending:
+                errors[video_id] = str(error)
             if isinstance(error, urllib.error.HTTPError):
                 try:
                     retry_after = float(error.headers.get("Retry-After", "0"))
                 except ValueError:
-                    retry_after = 0.0
+                    pass
+        if pending and attempt + 1 < args.retries:
             time.sleep(max(retry_after, 2**attempt) + random.uniform(0, 0.5))
-    detail = f" Last content: {last_content[:400]!r}" if last_content else ""
-    ids = ",".join(str(row["video_id"]) for row in rows)
-    raise RuntimeError(f"[{ids}]: API rewrite failed after {args.retries} attempts: {last_error}.{detail}")
+    if pending and last_content:
+        for video_id in pending:
+            errors[video_id] = f"{errors.get(video_id, 'validation failed')}. Last content: {last_content[:400]!r}"
+    return {"rewrites": rewrites, "errors": errors, "api_model": api_model}
 
 
 def validate_rewrite(category: str, rewrite: dict[str, Any]) -> tuple[str, list[str], list[str]]:
@@ -193,8 +209,8 @@ def validate_rewrite(category: str, rewrite: dict[str, Any]) -> tuple[str, list[
     if set(rewrite) not in allowed_keys:
         raise ValueError(f"Expected JSON keys {sorted(required_keys)}, got {sorted(rewrite)}")
     caption = str(rewrite["caption"]).strip()
-    if not 5 <= len(caption.split()) <= 32:
-        raise ValueError(f"Caption must contain 5..32 words, got {len(caption.split())}: {caption!r}")
+    if not 4 <= len(caption.split()) <= 32:
+        raise ValueError(f"Caption must contain 4..32 words, got {len(caption.split())}: {caption!r}")
     if not caption.endswith((".", "!", "?")):
         raise ValueError(f"Caption must end with sentence punctuation: {caption!r}")
     context_match = CONTEXT_TERM_PATTERN.search(caption)
@@ -216,13 +232,39 @@ def validate_rewrite(category: str, rewrite: dict[str, Any]) -> tuple[str, list[
     for pattern in REQUIRED_ENTITY_PATTERNS[category]:
         if not any(re.search(pattern, item, flags=re.IGNORECASE) for item in entities):
             raise ValueError(f"entities misses required entity pattern {pattern!r}: {entities!r}")
-    def has_relation(*patterns: str) -> bool:
-        return any(all(re.search(pattern, relation, flags=re.IGNORECASE) for pattern in patterns) for relation in relations)
-    if category == "07" and (not has_relation(r"\bperson(?:s)?\b", r"\bball(?:s)?\b") or not has_relation(r"\bdog(?:s)?\b", r"\bball(?:s)?\b")):
-        raise ValueError(f"Category 07 requires person-ball and dog-ball relations: {relations!r}")
-    if category == "08" and (not has_relation(r"\bperson(?:s)?\b", r"\bbird(?:s)?\b") or not has_relation(r"\bbird(?:s)?\b", r"\bflowers?\b")):
-        raise ValueError(f"Category 08 requires person-bird and bird-flower relations: {relations!r}")
+    if category in {"07", "08"} and not has_connected_relation_graph(
+        REQUIRED_ENTITY_PATTERNS[category], relations
+    ):
+        raise ValueError(
+            f"Category {category} requires a connected relation graph across all central entities: {relations!r}"
+        )
     return caption, entities, relations
+
+
+def has_connected_relation_graph(entity_patterns: tuple[str, ...], relations: list[str]) -> bool:
+    """Return whether every central entity participates in one relation graph."""
+    parents = list(range(len(entity_patterns)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for relation in relations:
+        mentioned = [
+            index
+            for index, pattern in enumerate(entity_patterns)
+            if re.search(pattern, relation, flags=re.IGNORECASE)
+        ]
+        for index in mentioned[1:]:
+            union(mentioned[0], index)
+    return len({find(index) for index in range(len(entity_patterns))}) == 1
 
 
 def main() -> None:
@@ -268,10 +310,18 @@ def main() -> None:
             batch = pending[start : start + args.batch_size]
             batch_number = start // args.batch_size + 1
             batch_count = (len(pending) + args.batch_size - 1) // args.batch_size
-            try:
-                response = request_rewrite(args, api_key, batch)
-                for row in batch:
-                    rewrite = response["rewrites"][str(row["video_id"])]
+            response = request_rewrite(args, api_key, batch)
+            batch_failures: list[dict[str, str]] = []
+            written = 0
+            for row in batch:
+                video_id = str(row["video_id"])
+                rewrite = response["rewrites"].get(video_id)
+                if rewrite is None:
+                    batch_failures.append(
+                        {"video_id": video_id, "error": response["errors"].get(video_id, "API did not return a rewrite")}
+                    )
+                    continue
+                try:
                     caption, entities, relations = validate_rewrite(str(row["category_id"]), rewrite)
                     output = dict(row)
                     output["source_caption"] = str(row["caption"])
@@ -281,15 +331,20 @@ def main() -> None:
                     output["caption_relations"] = relations
                     output["caption_rewrite_model"] = response["api_model"]
                     handle.write(json.dumps(output, ensure_ascii=False) + "\n")
-                handle.flush()
-                print(f"[deepseek-captions] batch {batch_number}/{batch_count} wrote {len(batch)} captions", flush=True)
-            except RuntimeError as error:
-                batch_failures = [{"video_id": str(row["video_id"]), "error": str(error)} for row in batch]
+                    written += 1
+                except ValueError as error:
+                    batch_failures.append({"video_id": video_id, "error": str(error)})
+            handle.flush()
+            if batch_failures:
                 failures.extend(batch_failures)
                 with failure_path.open("a", encoding="utf-8") as failure_handle:
                     for failure in batch_failures:
                         failure_handle.write(json.dumps(failure, ensure_ascii=False) + "\n")
-                print(f"[deepseek-captions] FAILED {error}", flush=True)
+            print(
+                f"[deepseek-captions] batch {batch_number}/{batch_count} wrote {written} captions"
+                + (f", failed {len(batch_failures)}" if batch_failures else ""),
+                flush=True,
+            )
             if args.sleep_seconds > 0 and start + len(batch) < len(pending):
                 time.sleep(args.sleep_seconds)
     if failures:
