@@ -68,7 +68,8 @@ export DEEPSEEK_MODEL=deepseek-v4-flash
 python scripts/rewrite_eeg_captions_deepseek.py \
   --input data/manifests/video_manifest.jsonl \
   --output data/manifests/structured_v2_video_manifest.jsonl \
-  --batch-size 8
+  --batch-size 8 \
+  --thinking disabled
 ```
 
 Inspect generated `caption`, `source_caption`, `caption_entities`, and

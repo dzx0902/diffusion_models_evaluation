@@ -43,6 +43,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key-env", default="DEEPSEEK_API_KEY")
     parser.add_argument("--base-url", default=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
     parser.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    parser.add_argument(
+        "--thinking",
+        choices=["disabled", "enabled"],
+        default="disabled",
+        help="DeepSeek V4 thinking mode; disable it for concise structured extraction.",
+    )
     parser.add_argument("--batch-size", type=int, default=8, help="Captions per API call; 8 is the recommended starting point.")
     parser.add_argument("--max-tokens", type=int, default=120, help="Maximum completion tokens per caption in a batch.")
     parser.add_argument("--retries", type=int, default=5)
@@ -117,6 +123,7 @@ def request_rewrite(args: argparse.Namespace, api_key: str, rows: list[dict[str,
                 "model": args.model,
                 "temperature": 0,
                 "max_tokens": args.max_tokens,
+                "thinking": {"type": args.thinking},
                 "response_format": {"type": "json_object"},
                 "messages": [
                     {"role": "system", "content": system_prompt()},
