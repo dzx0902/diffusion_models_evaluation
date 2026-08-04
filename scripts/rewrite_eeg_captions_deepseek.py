@@ -91,7 +91,7 @@ Rules:
 4. Use only generic central nouns: person, dog, car, bird, ball, flower(s). Do not retain setting nouns such as park, road, beach, garden, court, or indoor/outdoor context.
 5. Use one or two short sentences, normally 8 to 28 English words.
 6. Categories 07 and 08 have three central entities. Caption 07 must explicitly mention person, dog, and ball; caption 08 must explicitly mention person, bird, and flower(s).
-7. Keep distinct interactions explicit. Categories 07 and 08 must retain a connected relation graph across all three central entities. Direct relations are preferred but not mandatory: person-dog plus dog-ball, or person-flower plus bird-flower, are valid when faithful to the source. For example: "A person throws a ball. A dog runs after and catches the ball."
+7. Keep distinct interactions explicit. Categories 07 and 08 must retain every central entity in the relation list. Preserve independent actions when they occur in the source; never invent a direct interaction just to connect entities. Supporting entities such as a branch may link the central entities when needed. For example: "A person throws a ball. A dog runs after and catches the ball."
 8. Return exactly one item for every input video_id. Do not omit, duplicate, reorder, or invent video_id values.
 9. JSON must be valid and contain no markdown."""
 
@@ -232,18 +232,31 @@ def validate_rewrite(category: str, rewrite: dict[str, Any]) -> tuple[str, list[
     for pattern in REQUIRED_ENTITY_PATTERNS[category]:
         if not any(re.search(pattern, item, flags=re.IGNORECASE) for item in entities):
             raise ValueError(f"entities misses required entity pattern {pattern!r}: {entities!r}")
-    if category in {"07", "08"} and not has_connected_relation_graph(
-        REQUIRED_ENTITY_PATTERNS[category], relations
+    if category == "07" and not has_relation_coverage(REQUIRED_ENTITY_PATTERNS[category], relations):
+        raise ValueError(
+            f"Category 07 requires every central entity in at least one relation: {relations!r}"
+        )
+    if category == "08" and not has_connected_relation_graph(
+        REQUIRED_ENTITY_PATTERNS[category], entities, relations
     ):
         raise ValueError(
-            f"Category {category} requires a connected relation graph across all central entities: {relations!r}"
+            f"Category 08 requires a relation graph connecting person, bird, and flower: {relations!r}"
         )
     return caption, entities, relations
 
 
-def has_connected_relation_graph(entity_patterns: tuple[str, ...], relations: list[str]) -> bool:
-    """Return whether every central entity participates in one relation graph."""
-    parents = list(range(len(entity_patterns)))
+def has_relation_coverage(entity_patterns: tuple[str, ...], relations: list[str]) -> bool:
+    return all(
+        any(re.search(pattern, relation, flags=re.IGNORECASE) for relation in relations)
+        for pattern in entity_patterns
+    )
+
+
+def has_connected_relation_graph(
+    central_patterns: tuple[str, ...], entities: list[str], relations: list[str]
+) -> bool:
+    """Allow supporting entities to form paths between the required central entities."""
+    parents = list(range(len(entities)))
 
     def find(index: int) -> int:
         while parents[index] != index:
@@ -259,12 +272,21 @@ def has_connected_relation_graph(entity_patterns: tuple[str, ...], relations: li
     for relation in relations:
         mentioned = [
             index
-            for index, pattern in enumerate(entity_patterns)
-            if re.search(pattern, relation, flags=re.IGNORECASE)
+            for index, entity in enumerate(entities)
+            if re.search(rf"\b{re.escape(entity.strip())}\b", relation, flags=re.IGNORECASE)
         ]
         for index in mentioned[1:]:
             union(mentioned[0], index)
-    return len({find(index) for index in range(len(entity_patterns))}) == 1
+    central_indices = [
+        next(
+            (index for index, entity in enumerate(entities) if re.search(pattern, entity, flags=re.IGNORECASE)),
+            None,
+        )
+        for pattern in central_patterns
+    ]
+    return all(index is not None for index in central_indices) and len(
+        {find(index) for index in central_indices if index is not None}
+    ) == 1
 
 
 def main() -> None:
