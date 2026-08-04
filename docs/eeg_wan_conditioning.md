@@ -57,9 +57,9 @@ target export, and EEG training. Do not mix it with the original caption cache.
 For the recommended structured simplification, use
 `rewrite_eeg_captions_deepseek.py` with an API key stored only in the shell
 environment. It asks a language model to retain all central entities, counts,
-main actions, and relations while removing incidental visual detail. This is
-especially strict for the three-entity `07` (person, dog, ball) and `08`
-(person, bird, flowers) categories.
+main actions, and relations while removing incidental visual detail. For
+three-entity categories it preserves source-faithful connected interactions or
+independent simultaneous actions, without inventing a connection.
 
 ```bash
 export DEEPSEEK_API_KEY='set-this-in-your-shell-only'
@@ -78,6 +78,77 @@ that omits a category's mandatory entities and writes no API key to disk. Each
 batch is validated by `video_id`; use `--resume --batch-size 8` after an
 interruption to process failed and not-yet-written records without repeating
 successful ones.
+
+### Structured V2 Pilot Training
+
+`data/manifests/structured_v2_video_manifest.jsonl` is the checked-in,
+completed 624-caption manifest. Keep its entire output tree separate from the
+original-caption experiment so checkpoints and PCA projectors cannot mix.
+Run the text steps once in `wan22`; the cache is shared by every subject, while
+the PCA projector is fitted only to the selected fold's train captions.
+
+```bash
+STRUCTURED_MANIFEST=data/manifests/structured_v2_video_manifest.jsonl
+RUN_ROOT=outputs/eeg_wan_structured_v2
+FOLD=video_6fold_1
+
+for SUBJECT in chentianlin duzhuoxuan; do
+  python scripts/build_eeg_split_plans.py \
+    --video-manifest "$STRUCTURED_MANIFEST" \
+    --subject "$SUBJECT" \
+    --output-dir "$RUN_ROOT/splits" \
+    --overwrite
+done
+
+python scripts/cache_wan_text_states.py \
+  --prompt-file "$STRUCTURED_MANIFEST" \
+  --output-dir "$RUN_ROOT/text_cache"
+
+python scripts/analyze_wan_text_space.py \
+  --prompt-file "$RUN_ROOT/splits/chentianlin_video_6fold_captions/${FOLD}_train.jsonl" \
+  --only-prompt-file --encoder-backend wan --save-token-pca --pca-max-dim 512 \
+  --output-dir "$RUN_ROOT/$FOLD/text_space"
+
+python scripts/export_wan_fixed_pca_latents.py \
+  --cache-dir "$RUN_ROOT/text_cache" \
+  --projector "$RUN_ROOT/$FOLD/text_space/token_pca_projector.npz" \
+  --slots 128 --dim 512 \
+  --output-dir "$RUN_ROOT/$FOLD/pca_128x512"
+
+python scripts/build_eeg_wan_targets.py \
+  --video-manifest "$STRUCTURED_MANIFEST" \
+  --latent-index "$RUN_ROOT/$FOLD/pca_128x512/index.jsonl" \
+  --output "$RUN_ROOT/$FOLD/wan_targets.jsonl" \
+  --overwrite
+```
+
+Train each subject separately. Use a new directory and 80 epochs; previous
+original-caption checkpoints cannot be resumed because their target space is
+different. Derive the classifier bounds from the new target set, rather than
+reusing token bounds from an earlier caption scheme.
+
+```bash
+read MIN_TOKENS MAX_TOKENS < <(
+  python - "$RUN_ROOT/$FOLD/wan_targets.jsonl" <<'PY'
+import json
+import sys
+
+lengths = [json.loads(line)["tokens"] for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+print(min(lengths), max(lengths))
+PY
+)
+
+for SUBJECT in chentianlin duzhuoxuan; do
+  python scripts/train_eeg_wan_conditioner.py \
+    --trials "data/manifests/$SUBJECT/eeg_trials.csv" \
+    --targets "$RUN_ROOT/$FOLD/wan_targets.jsonl" \
+    --split-plan "$RUN_ROOT/splits/${SUBJECT}_video_6fold_plan.json" \
+    --experiment "$FOLD" \
+    --output-dir "$RUN_ROOT/$SUBJECT/$FOLD" \
+    --epochs 80 --batch-size 8 --hidden-dim 128 --encoder-layers 1 --decoder-layers 1 \
+    --workers 0 --min-tokens "$MIN_TOKENS" --max-tokens "$MAX_TOKENS"
+done
+```
 
 For `video_6fold_1`, the complete concise-target export is:
 
