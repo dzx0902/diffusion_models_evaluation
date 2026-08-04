@@ -30,6 +30,12 @@ REQUIRED_ENTITY_PATTERNS = {
     "07": (r"\bperson(?:s)?\b", r"\bdog(?:s)?\b", r"\bball(?:s)?\b"),
     "08": (r"\bperson(?:s)?\b", r"\bbird(?:s)?\b", r"\bflowers?\b"),
 }
+CONTEXT_TERM_PATTERN = re.compile(
+    r"\b(?:park|garden|yard|field|beach|street|road|sidewalk|court|gym|room|floor|"
+    r"forest|river|lake|sea|pier|plaza|balcony|greenhouse|indoors?|outdoors?|daytime|"
+    r"sunny|cloudy|overcast|dusk|sunset|snowy)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,7 +88,7 @@ Rules:
 1. Preserve every central entity, its count, the main action, and the direction of interaction.
 2. Do not invent entities, actions, or relations absent from the source.
 3. Remove names, race, age, clothing, colours, weather, lighting, camera language, and incidental background detail.
-4. Use generic nouns: person, dog, car, bird, ball, flower(s).
+4. Use only generic central nouns: person, dog, car, bird, ball, flower(s). Do not retain setting nouns such as park, road, beach, garden, court, or indoor/outdoor context.
 5. Use one or two short sentences, normally 8 to 28 English words.
 6. Categories 07 and 08 have three central entities. Caption 07 must explicitly mention person, dog, and ball; caption 08 must explicitly mention person, bird, and flower(s).
 7. Keep distinct interactions explicit. For example: "A person throws a ball. A dog runs after and catches the ball." 
@@ -191,6 +197,9 @@ def validate_rewrite(category: str, rewrite: dict[str, Any]) -> tuple[str, list[
         raise ValueError(f"Caption must contain 5..32 words, got {len(caption.split())}: {caption!r}")
     if not caption.endswith((".", "!", "?")):
         raise ValueError(f"Caption must end with sentence punctuation: {caption!r}")
+    context_match = CONTEXT_TERM_PATTERN.search(caption)
+    if context_match:
+        raise ValueError(f"Caption retains non-central context {context_match.group()!r}: {caption!r}")
     for pattern in REQUIRED_ENTITY_PATTERNS[category]:
         if not re.search(pattern, caption, flags=re.IGNORECASE):
             raise ValueError(f"Caption misses required entity pattern {pattern!r}: {caption!r}")
@@ -200,6 +209,13 @@ def validate_rewrite(category: str, rewrite: dict[str, Any]) -> tuple[str, list[
         raise ValueError("entities must be a non-empty list of strings")
     if not isinstance(relations, list) or not all(isinstance(item, str) and item.strip() for item in relations):
         raise ValueError("relations must be a non-empty list of strings")
+    for value in [*entities, *relations]:
+        context_match = CONTEXT_TERM_PATTERN.search(value)
+        if context_match:
+            raise ValueError(f"entities/relations retain non-central context {context_match.group()!r}: {value!r}")
+    for pattern in REQUIRED_ENTITY_PATTERNS[category]:
+        if not any(re.search(pattern, item, flags=re.IGNORECASE) for item in entities):
+            raise ValueError(f"entities misses required entity pattern {pattern!r}: {entities!r}")
     return caption, entities, relations
 
 
