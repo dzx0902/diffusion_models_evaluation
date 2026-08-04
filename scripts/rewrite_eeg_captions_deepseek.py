@@ -91,7 +91,7 @@ Rules:
 4. Use only generic central nouns: person, dog, car, bird, ball, flower(s). Do not retain setting nouns such as park, road, beach, garden, court, or indoor/outdoor context.
 5. Use one or two short sentences, normally 8 to 28 English words.
 6. Categories 07 and 08 have three central entities. Caption 07 must explicitly mention person, dog, and ball; caption 08 must explicitly mention person, bird, and flower(s).
-7. Keep distinct interactions explicit. For example: "A person throws a ball. A dog runs after and catches the ball." 
+7. Keep distinct interactions explicit. Category 07 must retain a person-ball relation and a dog-ball relation. Category 08 must retain a person-bird relation and a bird-flower relation. For example: "A person throws a ball. A dog runs after and catches the ball."
 8. Return exactly one item for every input video_id. Do not omit, duplicate, reorder, or invent video_id values.
 9. JSON must be valid and contain no markdown."""
 
@@ -216,6 +216,12 @@ def validate_rewrite(category: str, rewrite: dict[str, Any]) -> tuple[str, list[
     for pattern in REQUIRED_ENTITY_PATTERNS[category]:
         if not any(re.search(pattern, item, flags=re.IGNORECASE) for item in entities):
             raise ValueError(f"entities misses required entity pattern {pattern!r}: {entities!r}")
+    def has_relation(*patterns: str) -> bool:
+        return any(all(re.search(pattern, relation, flags=re.IGNORECASE) for pattern in patterns) for relation in relations)
+    if category == "07" and (not has_relation(r"\bperson(?:s)?\b", r"\bball(?:s)?\b") or not has_relation(r"\bdog(?:s)?\b", r"\bball(?:s)?\b")):
+        raise ValueError(f"Category 07 requires person-ball and dog-ball relations: {relations!r}")
+    if category == "08" and (not has_relation(r"\bperson(?:s)?\b", r"\bbird(?:s)?\b") or not has_relation(r"\bbird(?:s)?\b", r"\bflowers?\b")):
+        raise ValueError(f"Category 08 requires person-bird and bird-flower relations: {relations!r}")
     return caption, entities, relations
 
 
