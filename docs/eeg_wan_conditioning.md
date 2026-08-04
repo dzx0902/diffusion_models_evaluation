@@ -67,12 +67,16 @@ export DEEPSEEK_MODEL=deepseek-v4-flash
 
 python scripts/rewrite_eeg_captions_deepseek.py \
   --input data/manifests/video_manifest.jsonl \
-  --output data/manifests/structured_v2_video_manifest.jsonl
+  --output data/manifests/structured_v2_video_manifest.jsonl \
+  --batch-size 8
 ```
 
 Inspect generated `caption`, `source_caption`, `caption_entities`, and
 `caption_relations` before generating Wan targets. The script rejects a result
-that omits a category's mandatory entities and writes no API key to disk.
+that omits a category's mandatory entities and writes no API key to disk. Each
+batch is validated by `video_id`; use `--resume --batch-size 8` after an
+interruption to process failed and not-yet-written records without repeating
+successful ones.
 
 For `video_6fold_1`, the complete concise-target export is:
 
