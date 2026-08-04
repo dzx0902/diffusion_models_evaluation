@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import time
 import urllib.error
@@ -44,9 +45,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"))
     parser.add_argument("--max-tokens", type=int, default=180)
     parser.add_argument("--retries", type=int, default=5)
-    parser.add_argument("--sleep-seconds", type=float, default=0.15)
+    parser.add_argument("--sleep-seconds", type=float, default=0.8)
     parser.add_argument("--limit", type=int, default=0, help="Process at most this many rows; 0 means all rows.")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Append only missing video_ids to an existing partial output.")
     parser.add_argument("--dry-run", action="store_true", help="Print one request without calling the API.")
     return parser.parse_args()
 
@@ -92,28 +94,33 @@ def endpoint(base_url: str) -> str:
 
 
 def request_rewrite(args: argparse.Namespace, api_key: str, row: dict[str, Any]) -> dict[str, Any]:
-    payload = {
-        "model": args.model,
-        "temperature": 0,
-        "max_tokens": args.max_tokens,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system_prompt()},
-            {"role": "user", "content": user_prompt(row)},
-        ],
-    }
-    request = urllib.request.Request(
-        endpoint(args.base_url),
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
     last_error: Exception | None = None
+    last_content = ""
     for attempt in range(args.retries):
         try:
+            retry_instruction = ""
+            if attempt:
+                retry_instruction = "\nThis is a retry. Return a complete valid JSON object only; do not truncate strings."
+            payload = {
+                "model": args.model,
+                "temperature": 0,
+                "max_tokens": args.max_tokens,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt()},
+                    {"role": "user", "content": user_prompt(row) + retry_instruction},
+                ],
+            }
+            request = urllib.request.Request(
+                endpoint(args.base_url),
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                method="POST",
+            )
             with urllib.request.urlopen(request, timeout=90) as response:
                 api_response = json.loads(response.read().decode("utf-8"))
             content = api_response["choices"][0]["message"]["content"]
+            last_content = str(content)
             if not content:
                 raise ValueError("API returned empty JSON content")
             rewritten = json.loads(content)
@@ -125,8 +132,15 @@ def request_rewrite(args: argparse.Namespace, api_key: str, row: dict[str, Any])
             last_error = error
             if attempt + 1 == args.retries:
                 break
-            time.sleep(2**attempt)
-    raise RuntimeError(f"{row['video_id']}: API rewrite failed after {args.retries} attempts: {last_error}")
+            retry_after = 0.0
+            if isinstance(error, urllib.error.HTTPError):
+                try:
+                    retry_after = float(error.headers.get("Retry-After", "0"))
+                except ValueError:
+                    retry_after = 0.0
+            time.sleep(max(retry_after, 2**attempt) + random.uniform(0, 0.5))
+    detail = f" Last content: {last_content[:400]!r}" if last_content else ""
+    raise RuntimeError(f"{row['video_id']}: API rewrite failed after {args.retries} attempts: {last_error}.{detail}")
 
 
 def validate_rewrite(category: str, rewrite: dict[str, Any]) -> tuple[str, list[str], list[str]]:
@@ -160,7 +174,9 @@ def main() -> None:
             raise ValueError(f"Unsupported category: {row.get('category_id')!r}")
     if args.limit > 0:
         records = records[: args.limit]
-    if args.output.exists() and not args.overwrite:
+    if args.overwrite and args.resume:
+        raise ValueError("--overwrite and --resume cannot be used together")
+    if args.output.exists() and not (args.overwrite or args.resume):
         raise FileExistsError(f"Output exists; pass --overwrite to replace {args.output}")
     if args.dry_run:
         print(json.dumps({"endpoint": endpoint(args.base_url), "system": system_prompt(), "user": user_prompt(records[0])}, ensure_ascii=False, indent=2))
@@ -169,10 +185,23 @@ def main() -> None:
     if not api_key:
         raise RuntimeError(f"Set {args.api_key_env} in the environment; do not put API keys in source files or command arguments.")
 
+    existing_ids: set[str] = set()
+    if args.resume and args.output.exists():
+        existing = read_jsonl(args.output)
+        existing_ids = {str(row["video_id"]) for row in existing}
+        if len(existing_ids) != len(existing):
+            raise ValueError(f"Existing output contains duplicate video_id values: {args.output}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    failure_path = args.output.with_suffix(args.output.suffix + ".failures.jsonl")
+    if not args.resume and failure_path.exists():
+        failure_path.unlink()
     failures: list[dict[str, str]] = []
-    with args.output.open("w", encoding="utf-8") as handle:
+    mode = "a" if args.resume else "w"
+    with args.output.open(mode, encoding="utf-8") as handle:
         for index, row in enumerate(records, 1):
+            if str(row["video_id"]) in existing_ids:
+                print(f"[deepseek-captions] skip {index}/{len(records)} {row['video_id']}", flush=True)
+                continue
             try:
                 response = request_rewrite(args, api_key, row)
                 caption, entities, relations = validate_rewrite(str(row["category_id"]), response["rewrite"])
@@ -184,15 +213,17 @@ def main() -> None:
                 output["caption_relations"] = relations
                 output["caption_rewrite_model"] = response["api_model"]
                 handle.write(json.dumps(output, ensure_ascii=False) + "\n")
+                handle.flush()
                 print(f"[deepseek-captions] {index}/{len(records)} {row['video_id']}: {caption}", flush=True)
             except RuntimeError as error:
-                failures.append({"video_id": str(row["video_id"]), "error": str(error)})
+                failure = {"video_id": str(row["video_id"]), "error": str(error)}
+                failures.append(failure)
+                with failure_path.open("a", encoding="utf-8") as failure_handle:
+                    failure_handle.write(json.dumps(failure, ensure_ascii=False) + "\n")
                 print(f"[deepseek-captions] FAILED {error}", flush=True)
             if args.sleep_seconds > 0 and index < len(records):
                 time.sleep(args.sleep_seconds)
     if failures:
-        failure_path = args.output.with_suffix(args.output.suffix + ".failures.jsonl")
-        failure_path.write_text("".join(json.dumps(item, ensure_ascii=False) + "\n" for item in failures), encoding="utf-8")
         raise RuntimeError(f"{len(failures)} rewrites failed; see {failure_path}")
     print(f"[deepseek-captions] wrote {args.output} ({len(records)} videos)")
 
