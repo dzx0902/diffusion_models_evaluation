@@ -40,6 +40,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--video-id", required=True)
     parser.add_argument("--session", default="session3")
     parser.add_argument("--trial-index", type=int, default=None, help="Disambiguate an EEG trial if required.")
+    parser.add_argument(
+        "--condition-source",
+        choices=["eeg", "target"],
+        default="eeg",
+        help="Use EEG prediction or the exact stored PCA target as the Wan condition.",
+    )
     parser.add_argument("--length-source", choices=["predicted", "target", "fixed"], default="predicted")
     parser.add_argument("--fixed-tokens", type=int, default=0, help="Required when --length-source fixed.")
     parser.add_argument("--device", default="cuda")
@@ -136,7 +142,8 @@ def main() -> None:
     mean = torch.from_numpy(pca["mean"].astype(np.float32)).to(device)
     if components.shape != (config.latent_dim, 4096):
         raise ValueError(f"Unexpected PCA components shape: {tuple(components.shape)}")
-    context = predicted[:token_count].to(device) @ components + mean
+    condition_latent = target_latent.to(device) if args.condition_source == "target" else predicted
+    context = condition_latent[:token_count].to(device) @ components + mean
 
     valid = min(target_tokens, predicted.shape[0])
     latent_mse = float((predicted[:valid].cpu() - target_latent[:valid]).square().mean().item())
@@ -150,6 +157,7 @@ def main() -> None:
         "session": args.session,
         "trial_index": int(trial["trial_index"]),
         "checkpoint_epoch": int(checkpoint["epoch"]),
+        "condition_source": args.condition_source,
         "length_source": args.length_source,
         "target_tokens": target_tokens,
         "predicted_tokens": predicted_tokens,
@@ -161,7 +169,15 @@ def main() -> None:
     print("[wan-eeg] " + json.dumps(summary, ensure_ascii=True), flush=True)
     if args.condition_output is not None:
         args.condition_output.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"pca_latent": predicted.cpu(), "wan_context": context.cpu(), **summary}, args.condition_output)
+        torch.save(
+            {
+                "eeg_pca_latent": predicted.cpu(),
+                "condition_pca_latent": condition_latent.cpu(),
+                "wan_context": context.cpu(),
+                **summary,
+            },
+            args.condition_output,
+        )
 
     repo = args.wan_repo.resolve()
     generate_py = repo / "generate.py"
