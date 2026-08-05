@@ -141,7 +141,9 @@ def main() -> None:
     valid = min(target_tokens, predicted.shape[0])
     latent_mse = float((predicted[:valid].cpu() - target_latent[:valid]).square().mean().item())
     pooled_cosine = float(
-        F.cosine_similarity(predicted[:valid].mean(dim=0), target_latent[:valid].mean(dim=0), dim=0).cpu().item()
+        F.cosine_similarity(
+            predicted[:valid].mean(dim=0), target_latent[:valid].to(device).mean(dim=0), dim=0
+        ).cpu().item()
     )
     summary = {
         "video_id": args.video_id,
