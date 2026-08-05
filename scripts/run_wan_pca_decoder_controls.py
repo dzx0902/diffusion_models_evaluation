@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", default="ti2v-5B")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--offload-model", choices=["True", "False"], default="True")
+    parser.add_argument("--skip-native", action="store_true", help="Do not generate the native-text baseline.")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--enable-tf32", action="store_true")
     return parser.parse_args()
@@ -59,7 +60,8 @@ def main() -> None:
     wrapper = ROOT / "scripts" / "adapters" / "wan_projected_generate.py"
     ckpt_dir = args.wan_repo / "Wan2.2-TI2V-5B"
 
-    variants: list[tuple[str, int]] = [("native_text", 0)] + [(f"pca_{dim}", dim) for dim in args.dims]
+    variants: list[tuple[str, int]] = [] if args.skip_native else [("native_text", 0)]
+    variants.extend((f"pca_{dim}", dim) for dim in args.dims)
     for video_id in args.video_ids:
         prompt = str(records[video_id]["caption"])
         for label, dim in variants:

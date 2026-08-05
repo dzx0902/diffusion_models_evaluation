@@ -251,7 +251,7 @@ python scripts/run_wan_pca_decoder_controls.py \
   --dims 768 \
   --output-dir "$GLOBAL_CONTROL_ROOT" \
   --size "1280*704" --seed 0 --offload-model True \
-  --enable-tf32 --skip-existing
+  --enable-tf32 --skip-native --skip-existing
 ```
 
 Use `W_all` only as a leakage diagnostic upper bound: it may fit all 624
