@@ -150,6 +150,39 @@ for SUBJECT in chentianlin duzhuoxuan; do
 done
 ```
 
+### EEG-To-Wan Video Probe
+
+`wan_eeg_generate.py` uses one EEG trial to predict `[128, 512]`, applies the
+fold-specific PCA inverse transform, and patches Wan's T5 output at runtime.
+Use a held-out test video. `target` length is an oracle-length diagnostic that
+isolates the continuous EEG latent; `predicted` length is the fully EEG-driven
+setting. The prompt passed after `--` is only required by Wan's CLI and is not
+encoded into the generated condition.
+
+```bash
+VIDEO_ID=01-001  # Replace with a video_id from this fold's test partition.
+
+python scripts/adapters/wan_eeg_generate.py \
+  --wan-repo "$MS_MODELS_ROOT/Wan2.2" \
+  --checkpoint "$RUN_ROOT/chentianlin/$FOLD/last.pt" \
+  --trials data/manifests/chentianlin/eeg_trials.csv \
+  --targets "$RUN_ROOT/$FOLD/wan_targets.jsonl" \
+  --projector "$RUN_ROOT/$FOLD/text_space/token_pca_projector.npz" \
+  --video-id "$VIDEO_ID" --session session3 --length-source target \
+  --condition-output "$RUN_ROOT/probes/chentianlin_${VIDEO_ID}_target_length.pt" \
+  --enable-tf32 \
+  -- \
+  --task ti2v-5B --size "832*480" \
+  --ckpt_dir "$MS_MODELS_ROOT/Wan2.2/Wan2.2-TI2V-5B" \
+  --offload_model True --convert_model_dtype --t5_cpu --base_seed 0 \
+  --prompt "EEG-conditioned video." \
+  --save_file "$RUN_ROOT/probes/chentianlin_${VIDEO_ID}_target_length.mp4"
+```
+
+Repeat the same command with `--length-source predicted` and a distinct output
+name. Compare the two videos before attributing a failure to the continuous
+EEG latent rather than token-length prediction.
+
 For `video_6fold_1`, the complete concise-target export is:
 
 ```bash
