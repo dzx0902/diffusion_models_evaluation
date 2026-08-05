@@ -127,6 +127,77 @@ original-caption checkpoints cannot be resumed because their target space is
 different. Derive the classifier bounds from the new target set, rather than
 reusing token bounds from an earlier caption scheme.
 
+### Validate the PCA Decoder Before More EEG Video Generation
+
+The weak `condition-source target` control means that the PCA text-space
+round-trip must be measured separately from EEG prediction.  Run this once for
+the current fold. It fits a larger projector only on the 416 train captions,
+then evaluates reconstruction on the held-out 104 test captions. It does not
+generate videos.
+
+```bash
+PCA_ROOT="$RUN_ROOT/$FOLD/pca_decoder_validation"
+
+python scripts/analyze_wan_text_space.py \
+  --prompt-file "$RUN_ROOT/splits/chentianlin_video_6fold_captions/${FOLD}_train.jsonl" \
+  --only-prompt-file --encoder-backend wan \
+  --save-token-pca --pca-max-dim 1536 \
+  --dims 512 768 1024 1536 \
+  --output-dir "$PCA_ROOT/text_space"
+
+python scripts/evaluate_wan_pca_holdout.py \
+  --cache-dir "$RUN_ROOT/text_cache" \
+  --projector "$PCA_ROOT/text_space/token_pca_projector.npz" \
+  --video-manifest "$STRUCTURED_MANIFEST" \
+  --split-plan "$RUN_ROOT/splits/chentianlin_video_6fold_plan.json" \
+  --experiment "$FOLD" --partition test \
+  --dims 512 768 1024 1536 \
+  --output-dir "$PCA_ROOT/heldout_test"
+
+cat "$PCA_ROOT/heldout_test/report.md"
+```
+
+`per_video.csv` exposes the difficult captions by dimension, while
+`summary.csv` reports the overall reconstruction. This is a true held-out
+check: the held-out captions never participate in the PCA fit. It evaluates
+the deterministic PCA inverse only, so an error here cannot be attributed to
+EEG.
+
+Next, generate the native text control plus exact PCA round trips for only the
+three previously selected held-out videos. This script does not load an EEG
+checkpoint. Every variant uses the identical prompt, seed, Wan checkpoint, and
+sampling configuration.
+
+```bash
+CONTROL_ROOT="$PCA_ROOT/video_controls"
+
+python scripts/run_wan_pca_decoder_controls.py \
+  --wan-repo "$MS_MODELS_ROOT/Wan2.2" \
+  --projector "$PCA_ROOT/text_space/token_pca_projector.npz" \
+  --manifest "$STRUCTURED_MANIFEST" \
+  --video-ids 02-040 06-069 07-031 \
+  --dims 512 768 1024 1536 \
+  --output-dir "$CONTROL_ROOT" \
+  --size "1280*704" --seed 0 --offload-model True \
+  --enable-tf32 --skip-existing
+
+conda activate ms-video-eval
+python scripts/score_eeg_wan_probe_videos.py \
+  --videos "$CONTROL_ROOT"/*.mp4 \
+  --manifest "$STRUCTURED_MANIFEST" \
+  --settings configs/ms_eval_settings.wsl.yaml \
+  --output-dir "$CONTROL_ROOT/yolo" \
+  --sample-every 4
+cat "$CONTROL_ROOT/yolo/report.md"
+```
+
+Expected output names are `02-040_native_text_seed0.mp4` and
+`02-040_pca_512_seed0.mp4` (and so on). Do not use the old 512-dimensional
+EEG checkpoint with the new 768/1024/1536 projector: these video controls are
+PCA-only. Select the smallest dimension whose generated object score and
+manual semantics stay close to `native_text`; only then rebuild the fixed PCA
+targets and retrain the EEG conditioner for that dimension.
+
 ```bash
 read MIN_TOKENS MAX_TOKENS < <(
   python - "$RUN_ROOT/$FOLD/wan_targets.jsonl" <<'PY'
