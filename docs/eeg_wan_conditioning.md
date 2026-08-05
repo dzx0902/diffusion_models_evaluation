@@ -215,6 +215,15 @@ and select it using fold-validation captions. The test partition is used only
 after the checkpoint is frozen. Start with `k=1024`; do not train EEG until the
 exact-latent Wan controls are acceptable.
 
+The structured captions can contain duplicate strings for distinct videos. The
+default trainer rejects duplicates spanning train and validation because that
+is not a caption-held-out validation. For a *codec feasibility pretraining*
+pilot only, append `--allow-prompt-overlap`; the log will warn explicitly.
+This is acceptable for answering whether `E/D` can decode the known condition
+distribution, but its validation score must not be reported as strict unseen-
+caption generalization. A video-level reconstruction objective also requires
+more distinctive captions than the current simplified duplicate groups.
+
 ```bash
 AE_ROOT="$RUN_ROOT/$FOLD/wan_condition_ae_k1024"
 TRAIN_CAPTIONS="$RUN_ROOT/splits/chentianlin_video_6fold_captions/${FOLD}_train.jsonl"

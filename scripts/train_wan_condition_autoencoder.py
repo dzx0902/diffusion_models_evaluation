@@ -31,6 +31,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", type=Path, required=True)
     parser.add_argument("--train-prompts", type=Path, required=True, help="JSONL/txt captions used to fit the autoencoder.")
     parser.add_argument("--validation-prompts", type=Path, required=True, help="Held-out JSONL/txt captions for validation.")
+    parser.add_argument(
+        "--allow-prompt-overlap",
+        action="store_true",
+        help=(
+            "Allow identical caption states in train and validation for codec pretraining only. "
+            "This invalidates caption-held-out validation and is never the default."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--slots", type=int, default=128)
     parser.add_argument("--latent-dim", type=int, default=1024)
@@ -110,8 +118,14 @@ def main() -> None:
     index = cache_index(args.cache_dir)
     train_prompts, validation_prompts = prompts(args.train_prompts), prompts(args.validation_prompts)
     overlap = set(train_prompts) & set(validation_prompts)
-    if overlap:
+    if overlap and not args.allow_prompt_overlap:
         raise ValueError(f"Train/validation prompt overlap: {next(iter(overlap))!r}")
+    if overlap:
+        print(
+            f"[wan-ae] WARNING: allowing {len(overlap)} train/validation duplicate captions for codec pretraining; "
+            "validation is not caption-held-out.",
+            flush=True,
+        )
     missing = [prompt for prompt in train_prompts + validation_prompts if prompt not in index]
     if missing:
         raise KeyError(f"Cached states missing for {len(missing)} prompts, e.g. {missing[0]!r}")
