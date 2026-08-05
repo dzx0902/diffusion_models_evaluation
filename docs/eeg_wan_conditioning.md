@@ -183,6 +183,23 @@ Repeat the same command with `--length-source predicted` and a distinct output
 name. Compare the two videos before attributing a failure to the continuous
 EEG latent rather than token-length prediction.
 
+Before generating any videos, rank all held-out trials without loading Wan:
+
+```bash
+python scripts/evaluate_eeg_wan_predictions.py \
+  --trials data/manifests/chentianlin/eeg_trials.csv \
+  --targets "$RUN_ROOT/$FOLD/wan_targets.jsonl" \
+  --checkpoint "$RUN_ROOT/chentianlin/$FOLD/last.pt" \
+  --split-plan "$RUN_ROOT/splits/chentianlin_video_6fold_plan.json" \
+  --experiment "$FOLD" --partition test \
+  --output-dir "$RUN_ROOT/chentianlin/$FOLD/test_ranking"
+```
+
+This writes per-session `trial_metrics.csv`, per-video `video_ranking.csv`,
+and `summary.json`. Select videos using high mean pooled cosine, low MSE, and
+stable results over all three sessions; then use `wan_eeg_generate.py` only for
+those candidates.
+
 For `video_6fold_1`, the complete concise-target export is:
 
 ```bash
