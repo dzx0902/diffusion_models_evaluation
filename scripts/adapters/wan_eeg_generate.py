@@ -28,6 +28,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ms_video_eval.eeg_conditioner import EEGConditioner, EEGConditionerConfig
+from ms_video_eval.wan_condition_autoencoder import WanConditionAutoencoder, WanConditionAutoencoderConfig
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -36,7 +37,8 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--checkpoint", type=Path, required=True, help="EEGConditioner checkpoint.")
     parser.add_argument("--trials", type=Path, required=True, help="Subject eeg_trials.csv.")
     parser.add_argument("--targets", type=Path, required=True, help="Fold-specific wan_targets.jsonl.")
-    parser.add_argument("--projector", type=Path, required=True, help="Fold-specific token_pca_projector.npz.")
+    parser.add_argument("--projector", type=Path, default=None, help="Fold-specific token_pca_projector.npz.")
+    parser.add_argument("--autoencoder-checkpoint", type=Path, default=None, help="Frozen Wan condition autoencoder checkpoint.")
     parser.add_argument("--video-id", required=True)
     parser.add_argument("--session", default="session3")
     parser.add_argument("--trial-index", type=int, default=None, help="Disambiguate an EEG trial if required.")
@@ -102,6 +104,8 @@ def patch_wan_t5(context: torch.Tensor) -> None:
 
 def main() -> None:
     args, wan_args = parse_args()
+    if (args.projector is None) == (args.autoencoder_checkpoint is None):
+        raise ValueError("Pass exactly one of --projector or --autoencoder-checkpoint.")
     if args.length_source == "fixed" and not 1 <= args.fixed_tokens <= 128:
         raise ValueError("--fixed-tokens must be within 1..128 when --length-source fixed.")
     if not wan_args:
@@ -137,13 +141,25 @@ def main() -> None:
     else:
         token_count = predicted_tokens
 
-    pca = np.load(args.projector)
-    components = torch.from_numpy(pca["components"][: config.latent_dim].astype(np.float32)).to(device)
-    mean = torch.from_numpy(pca["mean"].astype(np.float32)).to(device)
-    if components.shape != (config.latent_dim, 4096):
-        raise ValueError(f"Unexpected PCA components shape: {tuple(components.shape)}")
     condition_latent = target_latent.to(device) if args.condition_source == "target" else predicted
-    context = condition_latent[:token_count].to(device) @ components + mean
+    if args.projector is not None:
+        pca = np.load(args.projector)
+        components = torch.from_numpy(pca["components"][: config.latent_dim].astype(np.float32)).to(device)
+        mean = torch.from_numpy(pca["mean"].astype(np.float32)).to(device)
+        if components.shape != (config.latent_dim, 4096):
+            raise ValueError(f"Unexpected PCA components shape: {tuple(components.shape)}")
+        context = condition_latent[:token_count].to(device) @ components + mean
+        decoder_type = "pca"
+    else:
+        decoder_checkpoint = torch.load(args.autoencoder_checkpoint, map_location=device, weights_only=False)
+        decoder_config = WanConditionAutoencoderConfig(**decoder_checkpoint["config"])
+        if decoder_config.latent_dim != config.latent_dim or decoder_config.slots != predicted.shape[0]:
+            raise ValueError("EEG target shape and autoencoder decoder configuration differ.")
+        decoder = WanConditionAutoencoder(decoder_config).to(device).eval()
+        decoder.load_state_dict(decoder_checkpoint["state_dict"])
+        with torch.inference_mode():
+            context = decoder.decode(condition_latent.unsqueeze(0), torch.tensor([token_count], device=device))[0, :token_count]
+        decoder_type = "autoencoder"
 
     valid = min(target_tokens, predicted.shape[0])
     latent_mse = float((predicted[:valid].cpu() - target_latent[:valid]).square().mean().item())
@@ -158,6 +174,7 @@ def main() -> None:
         "trial_index": int(trial["trial_index"]),
         "checkpoint_epoch": int(checkpoint["epoch"]),
         "condition_source": args.condition_source,
+        "decoder_type": decoder_type,
         "length_source": args.length_source,
         "target_tokens": target_tokens,
         "predicted_tokens": predicted_tokens,

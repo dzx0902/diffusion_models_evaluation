@@ -1,4 +1,4 @@
-"""Train raw EEG -> fixed [128, 512] Wan PCA conditions.
+"""Train raw EEG -> fixed Wan condition latents.
 
 The split is session based by default. A video must never be joined by row order:
 the trial manifest carries the NPZ trial_index and the target manifest is keyed
@@ -50,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--encoder-layers", type=int, default=2)
     parser.add_argument("--decoder-layers", type=int, default=2)
     parser.add_argument("--sample-points", type=int, default=600)
+    parser.add_argument("--slots", type=int, default=128)
+    parser.add_argument("--latent-dim", type=int, default=None, help="Infer from targets when omitted.")
     parser.add_argument("--min-tokens", type=int, default=None, help="Defaults to the minimum training-target length.")
     parser.add_argument("--max-tokens", type=int, default=None, help="Defaults to the maximum training-target length.")
     parser.add_argument("--seed", type=int, default=42)
@@ -99,9 +101,11 @@ def best_history_loss(path: Path) -> float:
 
 
 class EEGWanDataset(Dataset):
-    def __init__(self, rows: list[dict[str, str]], targets: dict[str, dict[str, Any]]) -> None:
+    def __init__(self, rows: list[dict[str, str]], targets: dict[str, dict[str, Any]], slots: int, latent_dim: int) -> None:
         self.rows = rows
         self.targets = targets
+        self.slots = slots
+        self.latent_dim = latent_dim
         self.npz_cache: dict[str, Any] = {}
         self.target_cache: dict[str, dict[str, torch.Tensor]] = {}
 
@@ -118,8 +122,8 @@ class EEGWanDataset(Dataset):
             payload = torch.load(self.targets[video_id]["latent_path"], map_location="cpu", weights_only=True)
             latent = payload["latent"].float()
             tokens = int(payload["tokens"])
-            if latent.shape != (128, 512) or not 1 <= tokens <= 128:
-                raise ValueError(f"Invalid fixed PCA target for {video_id}: {tuple(latent.shape)}, tokens={tokens}")
+            if latent.shape != (self.slots, self.latent_dim) or not 1 <= tokens <= self.slots:
+                raise ValueError(f"Invalid fixed target for {video_id}: {tuple(latent.shape)}, tokens={tokens}")
             self.target_cache[video_id] = {"latent": latent, "tokens": torch.tensor(tokens, dtype=torch.long)}
         return self.target_cache[video_id]
 
@@ -200,14 +204,21 @@ def main() -> None:
             f"Target lengths [{min(all_lengths)}, {max(all_lengths)}] exceed classifier range "
             f"[{min_tokens}, {max_tokens}]. Pass --min-tokens/--max-tokens explicitly."
         )
+    example_payload = torch.load(next(iter(targets.values()))["latent_path"], map_location="cpu", weights_only=True)
+    target_shape = tuple(example_payload["latent"].shape)
+    if len(target_shape) != 2 or target_shape[0] != args.slots:
+        raise ValueError(f"Expected target shape [{args.slots}, latent_dim], got {target_shape}")
+    latent_dim = args.latent_dim if args.latent_dim is not None else int(target_shape[1])
+    if target_shape[1] != latent_dim:
+        raise ValueError(f"Target latent_dim={target_shape[1]} differs from --latent-dim={latent_dim}")
     config = EEGConditionerConfig(
         hidden_dim=args.hidden_dim, encoder_layers=args.encoder_layers,
         decoder_layers=args.decoder_layers, sample_points=args.sample_points,
-        min_tokens=min_tokens, max_tokens=max_tokens,
+        slots=args.slots, latent_dim=latent_dim, min_tokens=min_tokens, max_tokens=max_tokens,
     )
     model = EEGConditioner(config).to(device)
-    train_loader = DataLoader(EEGWanDataset(train_rows, targets), batch_size=args.batch_size, shuffle=True, num_workers=args.workers, collate_fn=collate, pin_memory=device.type == "cuda")
-    val_loader = DataLoader(EEGWanDataset(val_rows, targets), batch_size=args.batch_size, shuffle=False, num_workers=args.workers, collate_fn=collate, pin_memory=device.type == "cuda")
+    train_loader = DataLoader(EEGWanDataset(train_rows, targets, args.slots, latent_dim), batch_size=args.batch_size, shuffle=True, num_workers=args.workers, collate_fn=collate, pin_memory=device.type == "cuda")
+    val_loader = DataLoader(EEGWanDataset(val_rows, targets, args.slots, latent_dim), batch_size=args.batch_size, shuffle=False, num_workers=args.workers, collate_fn=collate, pin_memory=device.type == "cuda")
     if args.checkpoint is not None:
         checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
         checkpoint_config = EEGConditionerConfig(**checkpoint["config"])

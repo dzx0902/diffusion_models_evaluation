@@ -198,6 +198,118 @@ PCA-only. Select the smallest dimension whose generated object score and
 manual semantics stay close to `native_text`; only then rebuild the fixed PCA
 targets and retrain the EEG conditioner for that dimension.
 
+### Learned Fixed Wan Condition Space
+
+PCA is a linear baseline, not the final target space. The learned alternative
+keeps the same fixed-slot interface but learns a contextual sequence encoder
+and decoder:
+
+```text
+Wan T5 state H [N,4096] -> pad to [128,4096] -> encoder E -> Z [128,k]
+Z [128,k] -> frozen decoder D -> H_hat [N,4096] -> Wan
+```
+
+The first implementation deliberately compresses only feature dimension; it
+does not also compress token slots. Train `E/D` only on the fold-train captions
+and select it using fold-validation captions. The test partition is used only
+after the checkpoint is frozen. Start with `k=1024`; do not train EEG until the
+exact-latent Wan controls are acceptable.
+
+```bash
+AE_ROOT="$RUN_ROOT/$FOLD/wan_condition_ae_k1024"
+TRAIN_CAPTIONS="$RUN_ROOT/splits/chentianlin_video_6fold_captions/${FOLD}_train.jsonl"
+VALID_CAPTIONS="$RUN_ROOT/splits/chentianlin_video_6fold_captions/${FOLD}_validation.jsonl"
+
+python scripts/train_wan_condition_autoencoder.py \
+  --cache-dir "$RUN_ROOT/text_cache" \
+  --train-prompts "$TRAIN_CAPTIONS" \
+  --validation-prompts "$VALID_CAPTIONS" \
+  --output-dir "$AE_ROOT" \
+  --slots 128 --latent-dim 1024 --hidden-dim 1024 \
+  --encoder-layers 2 --decoder-layers 2 --heads 8 \
+  --epochs 100 --batch-size 4 --workers 0
+
+python scripts/evaluate_wan_condition_autoencoder.py \
+  --cache-dir "$RUN_ROOT/text_cache" \
+  --checkpoint "$AE_ROOT/best.pt" \
+  --video-manifest "$STRUCTURED_MANIFEST" \
+  --split-plan "$RUN_ROOT/splits/chentianlin_video_6fold_plan.json" \
+  --experiment "$FOLD" --partition test \
+  --output-dir "$AE_ROOT/heldout_test"
+
+cat "$AE_ROOT/heldout_test/report.md"
+```
+
+Validate the frozen decoder before any EEG training. The following creates only
+two exact-latent videos; `--skip-native` avoids regenerating existing native
+controls. Compare the result with the corresponding previously generated
+native-text video, then score with the same YOLO utility.
+
+```bash
+AE_CONTROL_ROOT="$AE_ROOT/video_controls"
+
+python scripts/run_wan_autoencoder_controls.py \
+  --wan-repo "$MS_MODELS_ROOT/Wan2.2" \
+  --autoencoder-checkpoint "$AE_ROOT/best.pt" \
+  --cache-dir "$RUN_ROOT/text_cache" \
+  --manifest "$STRUCTURED_MANIFEST" \
+  --video-ids 02-040 07-031 \
+  --output-dir "$AE_CONTROL_ROOT" \
+  --size "1280*704" --seed 0 --offload-model True \
+  --enable-tf32 --skip-native --skip-existing
+
+conda activate ms-video-eval
+python scripts/score_eeg_wan_probe_videos.py \
+  --videos "$AE_CONTROL_ROOT"/*.mp4 \
+  --manifest "$STRUCTURED_MANIFEST" \
+  --settings configs/ms_eval_settings.wsl.yaml \
+  --output-dir "$AE_CONTROL_ROOT/yolo" --sample-every 4
+cat "$AE_CONTROL_ROOT/yolo/report.md"
+```
+
+Only if these exact-latent controls preserve native semantics, export the
+frozen autoencoder targets and train a fresh EEG predictor. The existing
+512-dimensional PCA checkpoint is incompatible with this coordinate space.
+
+```bash
+conda activate wan22
+
+python scripts/export_wan_autoencoder_latents.py \
+  --cache-dir "$RUN_ROOT/text_cache" \
+  --checkpoint "$AE_ROOT/best.pt" \
+  --output-dir "$AE_ROOT/latents"
+
+python scripts/build_eeg_wan_targets.py \
+  --video-manifest "$STRUCTURED_MANIFEST" \
+  --latent-index "$AE_ROOT/latents/index.jsonl" \
+  --output "$AE_ROOT/wan_targets.jsonl" --overwrite
+
+read MIN_TOKENS MAX_TOKENS < <(
+  python - "$AE_ROOT/wan_targets.jsonl" <<'PY'
+import json
+import sys
+values = [json.loads(line)["tokens"] for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+print(min(values), max(values))
+PY
+)
+
+python scripts/train_eeg_wan_conditioner.py \
+  --trials data/manifests/chentianlin/eeg_trials.csv \
+  --targets "$AE_ROOT/wan_targets.jsonl" \
+  --split-plan "$RUN_ROOT/splits/chentianlin_video_6fold_plan.json" \
+  --experiment "$FOLD" \
+  --output-dir "$AE_ROOT/eeg_chentianlin" \
+  --epochs 80 --batch-size 8 --hidden-dim 128 \
+  --encoder-layers 1 --decoder-layers 1 --workers 0 \
+  --min-tokens "$MIN_TOKENS" --max-tokens "$MAX_TOKENS"
+```
+
+Use `scripts/adapters/wan_eeg_generate.py` with
+`--autoencoder-checkpoint "$AE_ROOT/best.pt"` instead of `--projector` for
+the final EEG-to-Wan probe. A Wan-aware frozen-DiT loss is intentionally not
+part of this first stage: add it only when the autoencoder's exact-latent
+controls fail despite good held-out reconstruction metrics.
+
 ### Validate Whether the PCA Basis Generalizes
 
 The PCA inverse itself is deterministic. The remaining question is whether a
