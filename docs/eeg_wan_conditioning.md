@@ -198,6 +198,68 @@ PCA-only. Select the smallest dimension whose generated object score and
 manual semantics stay close to `native_text`; only then rebuild the fixed PCA
 targets and retrain the EEG conditioner for that dimension.
 
+### Validate Whether the PCA Basis Generalizes
+
+The PCA inverse itself is deterministic. The remaining question is whether a
+projector fitted to 416 fold-train captions (`W_fold`) is too narrow for test
+caption semantics. Generate a short-caption calibration corpus that excludes
+all 624 experiment captions, then fit a fixed global basis (`W_global`). This
+is valid at deployment because no test prompt is used to fit either basis.
+
+```bash
+GLOBAL_ROOT="$PCA_ROOT/global_basis"
+
+python scripts/generate_wan_pca_calibration_corpus.py \
+  --count 1800 --seed 20260805 \
+  --exclude-manifest "$STRUCTURED_MANIFEST" \
+  --output "$GLOBAL_ROOT/calibration_prompts.jsonl"
+
+python scripts/analyze_wan_text_space.py \
+  --prompt-file "$GLOBAL_ROOT/calibration_prompts.jsonl" \
+  --only-prompt-file --encoder-backend wan \
+  --save-token-pca --pca-max-dim 1536 \
+  --max-token-samples 20000 \
+  --dims 512 768 1024 1536 \
+  --output-dir "$GLOBAL_ROOT/text_space"
+
+python scripts/evaluate_wan_pca_holdout.py \
+  --cache-dir "$RUN_ROOT/text_cache" \
+  --projector "$GLOBAL_ROOT/text_space/token_pca_projector.npz" \
+  --video-manifest "$STRUCTURED_MANIFEST" \
+  --split-plan "$RUN_ROOT/splits/chentianlin_video_6fold_plan.json" \
+  --experiment "$FOLD" --partition test \
+  --dims 512 768 1024 1536 \
+  --output-dir "$GLOBAL_ROOT/heldout_test"
+
+cat "$GLOBAL_ROOT/heldout_test/report.md"
+```
+
+Compare this report with `$PCA_ROOT/heldout_test/report.md`: lower error for
+the same dimension means the global calibration basis covers test semantics
+better than the fold-specific basis. Then compare `W_fold` and `W_global` in
+Wan directly at the selected candidate dimension. For example, use 768 after
+the 768 control has been generated:
+
+```bash
+GLOBAL_CONTROL_ROOT="$GLOBAL_ROOT/video_controls_k768"
+
+python scripts/run_wan_pca_decoder_controls.py \
+  --wan-repo "$MS_MODELS_ROOT/Wan2.2" \
+  --projector "$GLOBAL_ROOT/text_space/token_pca_projector.npz" \
+  --manifest "$STRUCTURED_MANIFEST" \
+  --video-ids 02-040 07-031 \
+  --dims 768 \
+  --output-dir "$GLOBAL_CONTROL_ROOT" \
+  --size "1280*704" --seed 0 --offload-model True \
+  --enable-tf32 --skip-existing
+```
+
+Use `W_all` only as a leakage diagnostic upper bound: it may fit all 624
+captions, including held-out ones, but must never be reported as a valid test
+result or used for the EEG evaluation. If `W_global` does not improve over
+`W_fold` at 768/1024, the next PCA-stage replacement is a learned decoder
+rather than more PCA tuning.
+
 ```bash
 read MIN_TOKENS MAX_TOKENS < <(
   python - "$RUN_ROOT/$FOLD/wan_targets.jsonl" <<'PY'
