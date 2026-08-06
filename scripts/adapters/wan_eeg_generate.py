@@ -28,6 +28,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ms_video_eval.eeg_conditioner import EEGConditioner, EEGConditionerConfig
+from ms_video_eval.wan_t5_injection import first_call_context_injector
 from ms_video_eval.wan_condition_autoencoder import WanConditionAutoencoder, WanConditionAutoencoderConfig
 
 
@@ -89,17 +90,13 @@ def load_eeg(row: dict[str, str]) -> torch.Tensor:
     return torch.from_numpy(signal).unsqueeze(0)
 
 
-def patch_wan_t5(context: torch.Tensor) -> None:
-    """Replace Wan's text encoder call while keeping its original pipeline intact."""
+def patch_wan_t5(context: torch.Tensor):  # type: ignore[no-untyped-def]
+    """Inject the positive condition while preserving native negative guidance."""
     from wan.modules.t5 import T5EncoderModel
 
-    def patched_call(self, texts, device):  # type: ignore[no-untyped-def]
-        if not isinstance(texts, (list, tuple)) or not texts:
-            raise ValueError("Wan T5 expects a non-empty batch of prompts.")
-        condition = context.to(device=torch.device(device), dtype=torch.bfloat16)
-        return [condition.clone() for _ in texts]
-
-    T5EncoderModel.__call__ = patched_call
+    original_call = T5EncoderModel.__call__
+    T5EncoderModel.__call__ = first_call_context_injector(original_call, context)
+    return original_call
 
 
 def main() -> None:
@@ -202,13 +199,16 @@ def main() -> None:
         raise FileNotFoundError(generate_py)
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
-    patch_wan_t5(context)
+    from wan.modules.t5 import T5EncoderModel
+
+    original_t5_call = patch_wan_t5(context)
     old_argv = sys.argv
     try:
         sys.argv = [str(generate_py), *wan_args]
         runpy.run_path(str(generate_py), run_name="__main__")
     finally:
         sys.argv = old_argv
+        T5EncoderModel.__call__ = original_t5_call
 
 
 if __name__ == "__main__":

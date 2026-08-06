@@ -61,7 +61,7 @@ def main() -> None:
     ckpt_dir = args.wan_repo / "Wan2.2-TI2V-5B"
 
     variants: list[tuple[str, int]] = [] if args.skip_native else [("native_text", 0)]
-    variants.extend((f"pca_{dim}", dim) for dim in args.dims)
+    variants.extend((f"pca_{dim}_posonly", dim) for dim in args.dims)
     for video_id in args.video_ids:
         prompt = str(records[video_id]["caption"])
         for label, dim in variants:
@@ -71,7 +71,14 @@ def main() -> None:
                 continue
             command = [sys.executable, str(wrapper), "--wan-repo", str(args.wan_repo)]
             if dim:
-                command.extend(["--projector", str(args.projector), "--project-dim", str(dim), "--report-error"])
+                command.extend(
+                    [
+                        "--projector", str(args.projector),
+                        "--project-dim", str(dim),
+                        "--positive-only",
+                        "--report-error",
+                    ]
+                )
             else:
                 command.append("--disable-projection")
             if args.enable_tf32:

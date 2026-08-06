@@ -19,6 +19,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ms_video_eval.wan_condition_autoencoder import WanConditionAutoencoder, WanConditionAutoencoderConfig
+from ms_video_eval.wan_t5_injection import first_call_context_injector
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,9 +52,7 @@ def run_wan(repo: Path, wan_args: list[str], context: torch.Tensor | None) -> No
 
     original_call = T5EncoderModel.__call__
     if context is not None:
-        def patched_call(self, texts, device):  # type: ignore[no-untyped-def]
-            return [context.to(torch.device(device), dtype=torch.bfloat16).clone() for _ in texts]
-        T5EncoderModel.__call__ = patched_call
+        T5EncoderModel.__call__ = first_call_context_injector(original_call, context)
     old_argv = sys.argv
     try:
         sys.argv = [str(repo / "generate.py"), *wan_args]

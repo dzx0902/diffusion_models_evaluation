@@ -71,6 +71,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="Print per-prompt reconstruction MSE/cosine diagnostics.",
     )
     parser.add_argument(
+        "--positive-only",
+        action="store_true",
+        help="Reconstruct only the positive prompt and keep native negative-prompt guidance.",
+    )
+    parser.add_argument(
         "--gpu-resident-models",
         action="store_true",
         help=(
@@ -174,13 +179,22 @@ def patch_wan_t5(
     fixed_slots: int,
     token_count: int,
     report_error: bool,
+    positive_only: bool,
 ) -> None:  # type: ignore[no-untyped-def]
     from wan.modules.t5 import T5EncoderModel
 
     original_call = T5EncoderModel.__call__
+    call_index = 0
 
     def patched_call(self, texts, device):  # type: ignore[no-untyped-def]
+        nonlocal call_index
         contexts = original_call(self, texts, device)
+        current_call = call_index
+        call_index += 1
+        if positive_only and current_call > 0:
+            if report_error:
+                print(f"[wan-projector] text_index={current_call} branch=native-negative", flush=True)
+            return contexts
         patched = []
         for idx, context in enumerate(contexts):
             recon = context
@@ -291,6 +305,7 @@ def main() -> None:
             args.fixed_latent_slots,
             args.token_count,
             args.report_error,
+            args.positive_only,
         )
         print(
             f"[wan-projector] enabled projector={args.projector} dim={args.project_dim} "
