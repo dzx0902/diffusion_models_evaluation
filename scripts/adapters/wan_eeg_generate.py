@@ -42,16 +42,32 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--autoencoder-checkpoint", type=Path, default=None, help="Frozen Wan condition autoencoder checkpoint.")
     parser.add_argument("--video-id", required=True)
     parser.add_argument("--session", default="session3")
+    parser.add_argument(
+        "--eeg-video-id",
+        default=None,
+        help="Use EEG from this video while retaining --video-id as the target (shuffled-control diagnostic).",
+    )
+    parser.add_argument(
+        "--eeg-session",
+        default=None,
+        help="EEG source session; defaults to --session.",
+    )
     parser.add_argument("--trial-index", type=int, default=None, help="Disambiguate an EEG trial if required.")
     parser.add_argument(
         "--condition-source",
-        choices=["eeg", "target"],
+        choices=["eeg", "target", "zero"],
         default="eeg",
         help="Use EEG prediction or the exact stored PCA target as the Wan condition.",
     )
     parser.add_argument("--length-source", choices=["predicted", "target", "fixed"], default="predicted")
     parser.add_argument("--fixed-tokens", type=int, default=0, help="Required when --length-source fixed.")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--expected-duration-sec",
+        type=float,
+        default=None,
+        help="Fail if the selected EEG trial does not have this duration.",
+    )
     parser.add_argument("--condition-output", type=Path, default=None, help="Optional .pt artifact for diagnostics.")
     parser.add_argument("--enable-tf32", action="store_true")
     args, wan_args = parser.parse_known_args()
@@ -68,15 +84,17 @@ def read_targets(path: Path) -> dict[str, dict[str, Any]]:
 def find_trial(args: argparse.Namespace) -> dict[str, str]:
     with args.trials.open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
+    eeg_video_id = args.eeg_video_id or args.video_id
+    eeg_session = args.eeg_session or args.session
     matches = [
         row
         for row in rows
-        if row["video_id"] == args.video_id and row["session"] == args.session
+        if row["video_id"] == eeg_video_id and row["session"] == eeg_session
         and (args.trial_index is None or int(row["trial_index"]) == args.trial_index)
     ]
     if len(matches) != 1:
         raise ValueError(
-            f"Expected exactly one trial for video_id={args.video_id!r}, session={args.session!r}; "
+            f"Expected exactly one EEG trial for video_id={eeg_video_id!r}, session={eeg_session!r}; "
             f"found {len(matches)}. Pass --trial-index when needed."
         )
     return matches[0]
@@ -119,6 +137,13 @@ def main() -> None:
     model.load_state_dict(checkpoint["state_dict"])
 
     trial = find_trial(args)
+    if args.expected_duration_sec is not None:
+        trial_duration = float(trial["duration_sec"])
+        if abs(trial_duration - args.expected_duration_sec) > 1e-6:
+            raise ValueError(
+                f"EEG source {trial['video_id']}/{trial['session']} has duration_sec={trial_duration}; "
+                f"expected {args.expected_duration_sec}"
+            )
     targets = read_targets(args.targets)
     if args.video_id not in targets:
         raise KeyError(f"No target for video_id={args.video_id!r}")
@@ -138,7 +163,12 @@ def main() -> None:
     else:
         token_count = predicted_tokens
 
-    condition_latent = target_latent.to(device) if args.condition_source == "target" else predicted
+    if args.condition_source == "target":
+        condition_latent = target_latent.to(device)
+    elif args.condition_source == "zero":
+        condition_latent = torch.zeros_like(predicted)
+    else:
+        condition_latent = predicted
     if args.projector is not None:
         pca = np.load(args.projector)
         components = torch.from_numpy(pca["components"][: config.latent_dim].astype(np.float32)).to(device)
@@ -168,6 +198,8 @@ def main() -> None:
     summary = {
         "video_id": args.video_id,
         "session": args.session,
+        "eeg_video_id": trial["video_id"],
+        "eeg_session": trial["session"],
         "trial_index": int(trial["trial_index"]),
         "checkpoint_epoch": int(checkpoint["epoch"]),
         "condition_source": args.condition_source,

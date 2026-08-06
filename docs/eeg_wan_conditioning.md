@@ -426,7 +426,7 @@ python scripts/adapters/wan_eeg_generate.py \
   --condition-output "$RUN_ROOT/probes/chentianlin_${VIDEO_ID}_target_length.pt" \
   --enable-tf32 \
   -- \
-  --task ti2v-5B --size "832*480" \
+  --task ti2v-5B --size "1280*704" \
   --ckpt_dir "$MS_MODELS_ROOT/Wan2.2/Wan2.2-TI2V-5B" \
   --offload_model True --convert_model_dtype --t5_cpu --base_seed 0 \
   --prompt "EEG-conditioned video." \
@@ -557,4 +557,82 @@ python scripts/train_eeg_wan_conditioner.py \
   --experiment video_6fold_1 \
   --validation-partition test \
   --checkpoint outputs/eeg_wan/chentianlin_video_6fold_1/best.pt
+```
+
+## 5. Four-Second Protocol And Condition Controls
+
+The current dataset contains both four-second and six-second trials. Pass
+`--duration-sec 4` to every training and ranking command so categories 07-08
+cannot enter the four-second baseline. The checkpoint records the resulting
+trial/video counts and refuses to resume from a checkpoint with a different
+recorded protocol.
+
+Audit the fold before training:
+
+```bash
+RUN_ROOT=outputs/eeg_wan_structured_v2
+FOLD=video_6fold_1
+TRIALS=data/manifests/chentianlin/eeg_trials.csv
+TARGETS="$RUN_ROOT/$FOLD/wan_targets.jsonl"
+SPLIT_PLAN="$RUN_ROOT/splits/chentianlin_video_6fold_plan.json"
+FOUR_S_ROOT=outputs/eeg_wan_4s_v1
+
+python scripts/audit_eeg_wan_protocol.py \
+  --trials "$TRIALS" \
+  --targets "$TARGETS" \
+  --split-plan "$SPLIT_PLAN" \
+  --experiment "$FOLD" \
+  --duration-sec 4 \
+  --output-dir "$FOUR_S_ROOT/protocol/$FOLD"
+```
+
+Train a diagnostic conditioner that focuses on the continuous `[128,512]`
+condition and uses oracle/fixed token length during generation. Setting the
+length loss to zero prevents the weak length classifier from dominating model
+selection; this is an ablation, not the final prompt-free length solution.
+
+```bash
+python scripts/train_eeg_wan_conditioner.py \
+  --trials "$TRIALS" \
+  --targets "$TARGETS" \
+  --split-plan "$SPLIT_PLAN" \
+  --experiment "$FOLD" \
+  --duration-sec 4 \
+  --output-dir "$FOUR_S_ROOT/chentianlin/$FOLD/regression_only" \
+  --epochs 20 --batch-size 8 \
+  --hidden-dim 128 --encoder-layers 1 --decoder-layers 1 \
+  --padding-weight 0.1 --length-weight 0 --pooled-weight 0.1 \
+  --workers 0
+```
+
+Rank only held-out four-second trials before loading Wan:
+
+```bash
+python scripts/evaluate_eeg_wan_predictions.py \
+  --trials "$TRIALS" \
+  --targets "$TARGETS" \
+  --checkpoint "$FOUR_S_ROOT/chentianlin/$FOLD/regression_only/best.pt" \
+  --split-plan "$SPLIT_PLAN" \
+  --experiment "$FOLD" --partition test \
+  --duration-sec 4 \
+  --output-dir "$FOUR_S_ROOT/chentianlin/$FOLD/regression_only/test_ranking"
+```
+
+For one selected target, run five matched generation controls with the same
+seed and oracle target length: native text, exact target, correct EEG, EEG from
+a different video, and a zero condition.
+
+```bash
+python scripts/run_eeg_wan_condition_controls.py \
+  --wan-repo "$MS_MODELS_ROOT/Wan2.2" \
+  --checkpoint "$FOUR_S_ROOT/chentianlin/$FOLD/regression_only/best.pt" \
+  --trials "$TRIALS" \
+  --targets "$TARGETS" \
+  --projector "$RUN_ROOT/$FOLD/pca_decoder_validation/text_space/token_pca_projector.npz" \
+  --manifest data/manifests/structured_v2_video_manifest.jsonl \
+  --video-id 02-040 --session session3 \
+  --shuffled-video-id 01-041 --shuffled-session session3 \
+  --duration-sec 4 \
+  --output-dir "$FOUR_S_ROOT/controls/02-040" \
+  --enable-tf32 --skip-existing
 ```

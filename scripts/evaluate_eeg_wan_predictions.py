@@ -21,6 +21,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ms_video_eval.eeg_conditioner import EEGConditioner, EEGConditionerConfig
+from ms_video_eval.eeg_protocol import filter_trial_duration
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +33,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiment", required=True)
     parser.add_argument("--partition", choices=["validation", "test"], default="test")
     parser.add_argument("--sessions", nargs="+", default=["session1", "session2", "session3"])
+    parser.add_argument(
+        "--duration-sec",
+        type=float,
+        default=None,
+        help="Evaluate only trials with this stimulus duration, e.g. 4.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
@@ -75,8 +82,9 @@ def main() -> None:
     args = parse_args()
     with args.trials.open("r", encoding="utf-8-sig", newline="") as handle:
         all_trials = list(csv.DictReader(handle))
+    duration_trials = filter_trial_duration(all_trials, args.duration_sec)
     ids = selected_ids(args)
-    trials = [row for row in all_trials if row["video_id"] in ids and row["session"] in set(args.sessions)]
+    trials = [row for row in duration_trials if row["video_id"] in ids and row["session"] in set(args.sessions)]
     if not trials:
         raise ValueError("No trials selected by the requested split partition and sessions")
     targets = read_targets(args.targets)
@@ -145,6 +153,21 @@ def main() -> None:
     for rank, row in enumerate(video_metrics, start=1):
         row["rank"] = rank
 
+    representative_indices = {
+        "top": 0,
+        "median": len(video_metrics) // 2,
+        "bottom": len(video_metrics) - 1,
+    }
+    representatives: dict[str, dict[str, Any]] = {}
+    for label, representative_index in representative_indices.items():
+        video = video_metrics[representative_index]
+        video_trials = grouped[str(video["video_id"])]
+        best_trial = max(
+            video_trials,
+            key=lambda row: (row["pooled_cosine"], -row["valid_latent_mse"]),
+        )
+        representatives[label] = {"video": video, "best_trial": best_trial}
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_csv(args.output_dir / "trial_metrics.csv", trial_metrics)
     write_csv(args.output_dir / "video_ranking.csv", video_metrics)
@@ -154,12 +177,16 @@ def main() -> None:
         "experiment": args.experiment,
         "partition": args.partition,
         "sessions": args.sessions,
+        "duration_sec": args.duration_sec,
+        "unfiltered_trial_count": len(all_trials),
+        "duration_filtered_trial_count": len(duration_trials),
         "trial_count": len(trial_metrics),
         "video_count": len(video_metrics),
         "mean_pooled_cosine": float(np.mean([row["pooled_cosine"] for row in trial_metrics])),
         "mean_valid_latent_mse": float(np.mean([row["valid_latent_mse"] for row in trial_metrics])),
         "mean_length_accuracy": float(np.mean([row["length_correct"] for row in trial_metrics])),
         "top_videos": video_metrics[:10],
+        "representatives": representatives,
     }
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2), flush=True)

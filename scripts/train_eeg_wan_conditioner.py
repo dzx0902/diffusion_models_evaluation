@@ -27,6 +27,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ms_video_eval.eeg_conditioner import EEGConditioner, EEGConditionerConfig, fixed_pca_loss
+from ms_video_eval.eeg_protocol import filter_trial_duration
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,10 +47,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--padding-weight", type=float, default=0.1)
+    parser.add_argument("--length-weight", type=float, default=0.2)
+    parser.add_argument("--pooled-weight", type=float, default=0.1)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--encoder-layers", type=int, default=2)
     parser.add_argument("--decoder-layers", type=int, default=2)
     parser.add_argument("--sample-points", type=int, default=600)
+    parser.add_argument(
+        "--duration-sec",
+        type=float,
+        default=None,
+        help="Train and validate only trials with this stimulus duration, e.g. 4.",
+    )
     parser.add_argument("--slots", type=int, default=128)
     parser.add_argument("--latent-dim", type=int, default=None, help="Infer from targets when omitted.")
     parser.add_argument("--min-tokens", type=int, default=None, help="Defaults to the minimum training-target length.")
@@ -151,7 +161,15 @@ def collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def evaluate(model: EEGConditioner, loader: DataLoader, device: torch.device) -> dict[str, float]:
+def evaluate(
+    model: EEGConditioner,
+    loader: DataLoader,
+    device: torch.device,
+    *,
+    padding_weight: float,
+    length_weight: float,
+    pooled_weight: float,
+) -> dict[str, float]:
     model.eval()
     aggregate = {"loss": 0.0, "valid_mse": 0.0, "padding_mse": 0.0, "length_ce": 0.0, "pooled_cosine_loss": 0.0, "length_accuracy": 0.0}
     count = 0
@@ -159,7 +177,16 @@ def evaluate(model: EEGConditioner, loader: DataLoader, device: torch.device) ->
         for batch in loader:
             predicted, logits = model(batch["eeg"].to(device))
             lengths = batch["tokens"].to(device)
-            _, values = fixed_pca_loss(predicted, batch["latent"].to(device), lengths, logits, model.config.min_tokens)
+            _, values = fixed_pca_loss(
+                predicted,
+                batch["latent"].to(device),
+                lengths,
+                logits,
+                model.config.min_tokens,
+                padding_weight=padding_weight,
+                length_weight=length_weight,
+                pooled_weight=pooled_weight,
+            )
             size = len(lengths)
             for key in values:
                 aggregate[key] += values[key] * size
@@ -172,12 +199,17 @@ def main() -> None:
     args = parse_args()
     if args.checkpoint is not None and args.resume is not None:
         raise ValueError("--checkpoint and --resume cannot be used together")
+    if min(args.padding_weight, args.length_weight, args.pooled_weight) < 0:
+        raise ValueError("Loss weights must be non-negative")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
     with args.trials.open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+        all_rows = list(csv.DictReader(handle))
+    rows = filter_trial_duration(all_rows, args.duration_sec)
+    if not rows:
+        raise ValueError(f"No trials remain after --duration-sec={args.duration_sec}")
     targets = read_targets(args.targets)
     train_sessions, val_sessions, train_ids, val_ids = resolve_split(args)
     train_rows = [
@@ -190,7 +222,8 @@ def main() -> None:
     ]
     if not train_rows or not val_rows:
         raise ValueError("Session split produced an empty train or validation set")
-    unknown = {row["video_id"] for row in rows} - set(targets)
+    selected_ids = {row["video_id"] for row in train_rows + val_rows}
+    unknown = selected_ids - set(targets)
     if unknown:
         raise KeyError(f"Targets missing {len(unknown)} video_ids, e.g. {sorted(unknown)[:5]}")
     train_lengths = [int(targets[row["video_id"]]["tokens"]) for row in train_rows]
@@ -198,13 +231,14 @@ def main() -> None:
     max_tokens = args.max_tokens if args.max_tokens is not None else max(train_lengths)
     if not 1 <= min_tokens <= max_tokens <= 128:
         raise ValueError(f"Invalid token range [{min_tokens}, {max_tokens}]")
-    all_lengths = [int(target["tokens"]) for target in targets.values()]
+    all_lengths = [int(targets[video_id]["tokens"]) for video_id in selected_ids]
     if min(all_lengths) < min_tokens or max(all_lengths) > max_tokens:
         raise ValueError(
             f"Target lengths [{min(all_lengths)}, {max(all_lengths)}] exceed classifier range "
             f"[{min_tokens}, {max_tokens}]. Pass --min-tokens/--max-tokens explicitly."
         )
-    example_payload = torch.load(next(iter(targets.values()))["latent_path"], map_location="cpu", weights_only=True)
+    example_id = next(iter(selected_ids))
+    example_payload = torch.load(targets[example_id]["latent_path"], map_location="cpu", weights_only=True)
     target_shape = tuple(example_payload["latent"].shape)
     if len(target_shape) != 2 or target_shape[0] != args.slots:
         raise ValueError(f"Expected target shape [{args.slots}, latent_dim], got {target_shape}")
@@ -217,6 +251,25 @@ def main() -> None:
         slots=args.slots, latent_dim=latent_dim, min_tokens=min_tokens, max_tokens=max_tokens,
     )
     model = EEGConditioner(config).to(device)
+    data_protocol = {
+        "duration_sec": args.duration_sec,
+        "all_trial_count": len(all_rows),
+        "duration_filtered_trial_count": len(rows),
+        "train_trial_count": len(train_rows),
+        "validation_trial_count": len(val_rows),
+        "train_video_count": len({row["video_id"] for row in train_rows}),
+        "validation_video_count": len({row["video_id"] for row in val_rows}),
+    }
+    loss_weights = {
+        "padding_weight": args.padding_weight,
+        "length_weight": args.length_weight,
+        "pooled_weight": args.pooled_weight,
+    }
+    print(
+        f"[eeg-wan] trials total={len(all_rows)} duration_filtered={len(rows)} "
+        f"train={len(train_rows)} validation={len(val_rows)} duration_sec={args.duration_sec}",
+        flush=True,
+    )
     train_loader = DataLoader(EEGWanDataset(train_rows, targets, args.slots, latent_dim), batch_size=args.batch_size, shuffle=True, num_workers=args.workers, collate_fn=collate, pin_memory=device.type == "cuda")
     val_loader = DataLoader(EEGWanDataset(val_rows, targets, args.slots, latent_dim), batch_size=args.batch_size, shuffle=False, num_workers=args.workers, collate_fn=collate, pin_memory=device.type == "cuda")
     if args.checkpoint is not None:
@@ -224,7 +277,14 @@ def main() -> None:
         checkpoint_config = EEGConditionerConfig(**checkpoint["config"])
         model = EEGConditioner(checkpoint_config).to(device)
         model.load_state_dict(checkpoint["state_dict"])
-        result = evaluate(model, val_loader, device)
+        result = evaluate(
+            model,
+            val_loader,
+            device,
+            padding_weight=args.padding_weight,
+            length_weight=args.length_weight,
+            pooled_weight=args.pooled_weight,
+        )
         print(f"[eeg-wan] checkpoint={args.checkpoint} evaluation={result}")
         return
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -238,6 +298,18 @@ def main() -> None:
         checkpoint_config = EEGConditionerConfig(**checkpoint["config"])
         if checkpoint_config != config:
             raise ValueError(f"Resume configuration differs from requested configuration: {checkpoint_config} != {config}")
+        checkpoint_protocol = checkpoint.get("data_protocol")
+        if checkpoint_protocol is not None and checkpoint_protocol != data_protocol:
+            raise ValueError(
+                "Resume data protocol differs from the current selection: "
+                f"{checkpoint_protocol} != {data_protocol}"
+            )
+        checkpoint_weights = checkpoint.get("loss_weights")
+        if checkpoint_weights is not None and checkpoint_weights != loss_weights:
+            raise ValueError(
+                "Resume loss weights differ from the current objective: "
+                f"{checkpoint_weights} != {loss_weights}"
+            )
         model.load_state_dict(checkpoint["state_dict"])
         start_epoch = int(checkpoint["epoch"]) + 1
         if "optimizer_state_dict" in checkpoint and "scheduler_state_dict" in checkpoint:
@@ -257,12 +329,28 @@ def main() -> None:
         for batch in train_loader:
             optimizer.zero_grad(set_to_none=True)
             predicted, logits = model(batch["eeg"].to(device))
-            loss, _ = fixed_pca_loss(predicted, batch["latent"].to(device), batch["tokens"].to(device), logits, config.min_tokens)
+            loss, _ = fixed_pca_loss(
+                predicted,
+                batch["latent"].to(device),
+                batch["tokens"].to(device),
+                logits,
+                config.min_tokens,
+                padding_weight=args.padding_weight,
+                length_weight=args.length_weight,
+                pooled_weight=args.pooled_weight,
+            )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
         scheduler.step()
-        valid = evaluate(model, val_loader, device)
+        valid = evaluate(
+            model,
+            val_loader,
+            device,
+            padding_weight=args.padding_weight,
+            length_weight=args.length_weight,
+            pooled_weight=args.pooled_weight,
+        )
         record = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"], "valid": valid}
         with history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
@@ -275,6 +363,8 @@ def main() -> None:
             "epoch": epoch,
             "valid": valid,
             "args": vars(args),
+            "data_protocol": data_protocol,
+            "loss_weights": loss_weights,
         }
         torch.save(payload, args.output_dir / "last.pt")
         if valid["loss"] < best:
