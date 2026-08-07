@@ -1,4 +1,4 @@
-"""Train raw EEG -> fixed Wan condition latents.
+"""Train raw EEG -> fixed text-condition latents.
 
 The split is session based by default. A video must never be joined by row order:
 the trial manifest carries the NPZ trial_index and the target manifest is keyed
@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,9 +31,9 @@ from ms_video_eval.eeg_protocol import filter_trial_duration
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train an EEG-to-Wan fixed PCA conditioner.")
+    parser = argparse.ArgumentParser(description="Train an EEG-to-video fixed text-condition model.")
     parser.add_argument("--trials", type=Path, required=True, help="eeg_trials.csv from build_eeg_video_manifest.py")
-    parser.add_argument("--targets", type=Path, required=True, help="wan_targets.jsonl from build_eeg_wan_targets.py")
+    parser.add_argument("--targets", type=Path, required=True, help="video_id -> fixed condition target JSONL")
     parser.add_argument("--train-sessions", nargs="+", default=["session1", "session2"])
     parser.add_argument("--val-sessions", nargs="+", default=["session3"])
     parser.add_argument("--split-plan", type=Path, default=None, help="Six-fold plan from build_eeg_split_plans.py.")
@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=ROOT / "outputs" / "eeg_wan" / "conditioner")
     parser.add_argument("--checkpoint", type=Path, default=None, help="Evaluate this checkpoint only; do not train.")
     parser.add_argument("--resume", type=Path, default=None, help="Resume training from last.pt after an interruption.")
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=40, help="Maximum epochs; early stopping may finish sooner.")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--lr", type=float, default=2e-4)
@@ -50,10 +50,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--padding-weight", type=float, default=0.1)
     parser.add_argument("--length-weight", type=float, default=0.2)
     parser.add_argument("--pooled-weight", type=float, default=0.1)
+    parser.add_argument("--contrastive-weight", type=float, default=0.0)
+    parser.add_argument("--contrastive-temperature", type=float, default=0.07)
+    parser.add_argument(
+        "--selection-metric",
+        choices=["loss", "valid_mse", "pooled_cosine_loss"],
+        default="loss",
+        help="Validation metric used for best.pt and early stopping (lower is better).",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=8,
+        help="Stop after this many unimproved epochs; use 0 to disable.",
+    )
+    parser.add_argument("--early-stop-min-delta", type=float, default=1e-4)
+    parser.add_argument("--min-epochs", type=int, default=10)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--encoder-layers", type=int, default=2)
     parser.add_argument("--decoder-layers", type=int, default=2)
-    parser.add_argument("--sample-points", type=int, default=600)
+    parser.add_argument("--sample-points", type=int, default=800)
+    parser.add_argument("--architecture", choices=["baseline", "multiscale"], default="baseline")
+    parser.add_argument("--sampling-rate", type=int, default=200)
+    parser.add_argument(
+        "--group-sessions",
+        action="store_true",
+        help="Keep all available sessions of a video in the same batch for multi-positive contrastive loss.",
+    )
     parser.add_argument(
         "--duration-sec",
         type=float,
@@ -99,15 +122,23 @@ def resolve_split(args: argparse.Namespace) -> tuple[set[str], set[str], set[str
     )
 
 
-def best_history_loss(path: Path) -> float:
+def history_early_stop_state(path: Path, metric: str, min_delta: float) -> tuple[float, int]:
     if not path.exists():
-        return float("inf")
+        return float("inf"), 0
     values = [
-        float(json.loads(line)["valid"]["loss"])
+        float(json.loads(line)["valid"][metric])
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    return min(values, default=float("inf"))
+    best = float("inf")
+    stale_epochs = 0
+    for value in values:
+        if value < best - min_delta:
+            best = value
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+    return best, stale_epochs
 
 
 class EEGWanDataset(Dataset):
@@ -148,6 +179,41 @@ class EEGWanDataset(Dataset):
         return {"eeg": torch.from_numpy(signal), **target, "video_id": row["video_id"]}
 
 
+class VideoGroupedBatchSampler(Sampler[list[int]]):
+    def __init__(self, rows: list[dict[str, str]], batch_size: int, shuffle: bool) -> None:
+        groups: dict[str, list[int]] = {}
+        for index, row in enumerate(rows):
+            groups.setdefault(row["video_id"], []).append(index)
+        if any(len(indices) > batch_size for indices in groups.values()):
+            raise ValueError("--batch-size is smaller than a complete video session group")
+        self.groups = list(groups.values())
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        groups = list(self.groups)
+        if self.shuffle:
+            random.shuffle(groups)
+        batch: list[int] = []
+        for group in groups:
+            if batch and len(batch) + len(group) > self.batch_size:
+                yield batch
+                batch = []
+            batch.extend(group)
+        if batch:
+            yield batch
+
+    def __len__(self) -> int:
+        count = 0
+        size = 0
+        for group in self.groups:
+            if size and size + len(group) > self.batch_size:
+                count += 1
+                size = 0
+            size += len(group)
+        return count + int(size > 0)
+
+
 def collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
     max_length = max(item["eeg"].shape[-1] for item in batch)
     eeg = torch.zeros(len(batch), batch[0]["eeg"].shape[0], max_length)
@@ -169,9 +235,11 @@ def evaluate(
     padding_weight: float,
     length_weight: float,
     pooled_weight: float,
+    contrastive_weight: float,
+    contrastive_temperature: float,
 ) -> dict[str, float]:
     model.eval()
-    aggregate = {"loss": 0.0, "valid_mse": 0.0, "padding_mse": 0.0, "length_ce": 0.0, "pooled_cosine_loss": 0.0, "length_accuracy": 0.0}
+    aggregate = {"loss": 0.0, "valid_mse": 0.0, "padding_mse": 0.0, "length_ce": 0.0, "pooled_cosine_loss": 0.0, "contrastive_loss": 0.0, "length_accuracy": 0.0}
     count = 0
     with torch.no_grad():
         for batch in loader:
@@ -186,6 +254,9 @@ def evaluate(
                 padding_weight=padding_weight,
                 length_weight=length_weight,
                 pooled_weight=pooled_weight,
+                contrastive_weight=contrastive_weight,
+                contrastive_temperature=contrastive_temperature,
+                positive_mask=video_positive_mask(batch["video_id"], device),
             )
             size = len(lengths)
             for key in values:
@@ -195,12 +266,24 @@ def evaluate(
     return {key: value / count for key, value in aggregate.items()}
 
 
+def video_positive_mask(video_ids: list[str], device: torch.device) -> torch.Tensor:
+    return torch.tensor(
+        [[left == right for right in video_ids] for left in video_ids],
+        device=device,
+        dtype=torch.bool,
+    )
+
+
 def main() -> None:
     args = parse_args()
     if args.checkpoint is not None and args.resume is not None:
         raise ValueError("--checkpoint and --resume cannot be used together")
-    if min(args.padding_weight, args.length_weight, args.pooled_weight) < 0:
+    if min(args.padding_weight, args.length_weight, args.pooled_weight, args.contrastive_weight) < 0:
         raise ValueError("Loss weights must be non-negative")
+    if args.contrastive_temperature <= 0:
+        raise ValueError("--contrastive-temperature must be positive")
+    if args.early_stop_patience < 0 or args.early_stop_min_delta < 0 or args.min_epochs < 1:
+        raise ValueError("Invalid early-stopping configuration")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -249,6 +332,7 @@ def main() -> None:
         hidden_dim=args.hidden_dim, encoder_layers=args.encoder_layers,
         decoder_layers=args.decoder_layers, sample_points=args.sample_points,
         slots=args.slots, latent_dim=latent_dim, min_tokens=min_tokens, max_tokens=max_tokens,
+        architecture=args.architecture, sampling_rate=args.sampling_rate,
     )
     model = EEGConditioner(config).to(device)
     data_protocol = {
@@ -259,19 +343,51 @@ def main() -> None:
         "validation_trial_count": len(val_rows),
         "train_video_count": len({row["video_id"] for row in train_rows}),
         "validation_video_count": len({row["video_id"] for row in val_rows}),
+        "group_sessions": args.group_sessions,
     }
     loss_weights = {
         "padding_weight": args.padding_weight,
         "length_weight": args.length_weight,
         "pooled_weight": args.pooled_weight,
+        "contrastive_weight": args.contrastive_weight,
+        "contrastive_temperature": args.contrastive_temperature,
     }
     print(
         f"[eeg-wan] trials total={len(all_rows)} duration_filtered={len(rows)} "
         f"train={len(train_rows)} validation={len(val_rows)} duration_sec={args.duration_sec}",
         flush=True,
     )
-    train_loader = DataLoader(EEGWanDataset(train_rows, targets, args.slots, latent_dim), batch_size=args.batch_size, shuffle=True, num_workers=args.workers, collate_fn=collate, pin_memory=device.type == "cuda")
-    val_loader = DataLoader(EEGWanDataset(val_rows, targets, args.slots, latent_dim), batch_size=args.batch_size, shuffle=False, num_workers=args.workers, collate_fn=collate, pin_memory=device.type == "cuda")
+    train_dataset = EEGWanDataset(train_rows, targets, args.slots, latent_dim)
+    val_dataset = EEGWanDataset(val_rows, targets, args.slots, latent_dim)
+    loader_kwargs = {
+        "num_workers": args.workers,
+        "collate_fn": collate,
+        "pin_memory": device.type == "cuda",
+    }
+    if args.group_sessions:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=VideoGroupedBatchSampler(train_rows, args.batch_size, shuffle=True),
+            **loader_kwargs,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_sampler=VideoGroupedBatchSampler(val_rows, args.batch_size, shuffle=False),
+            **loader_kwargs,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            **loader_kwargs,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            **loader_kwargs,
+        )
     if args.checkpoint is not None:
         checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
         checkpoint_config = EEGConditionerConfig(**checkpoint["config"])
@@ -284,6 +400,8 @@ def main() -> None:
             padding_weight=args.padding_weight,
             length_weight=args.length_weight,
             pooled_weight=args.pooled_weight,
+            contrastive_weight=args.contrastive_weight,
+            contrastive_temperature=args.contrastive_temperature,
         )
         print(f"[eeg-wan] checkpoint={args.checkpoint} evaluation={result}")
         return
@@ -291,7 +409,15 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     history_path = args.output_dir / "history.jsonl"
-    best = best_history_loss(history_path)
+    if history_path.exists() and args.resume is None:
+        raise FileExistsError(
+            f"Training history already exists; pass --resume or choose a new --output-dir: {history_path}"
+        )
+    best, stale_epochs = history_early_stop_state(
+        history_path,
+        args.selection_metric,
+        args.early_stop_min_delta,
+    )
     start_epoch = 1
     if args.resume is not None:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
@@ -310,6 +436,15 @@ def main() -> None:
                 "Resume loss weights differ from the current objective: "
                 f"{checkpoint_weights} != {loss_weights}"
             )
+        checkpoint_early_stopping = checkpoint.get("early_stopping")
+        if checkpoint_early_stopping is not None:
+            if checkpoint_early_stopping["metric"] != args.selection_metric:
+                raise ValueError(
+                    "Resume selection metric differs from checkpoint: "
+                    f"{checkpoint_early_stopping['metric']} != {args.selection_metric}"
+                )
+            best = float(checkpoint_early_stopping["best"])
+            stale_epochs = int(checkpoint_early_stopping["stale_epochs"])
         model.load_state_dict(checkpoint["state_dict"])
         start_epoch = int(checkpoint["epoch"]) + 1
         if "optimizer_state_dict" in checkpoint and "scheduler_state_dict" in checkpoint:
@@ -323,6 +458,17 @@ def main() -> None:
             print(f"[eeg-wan] resumed model-only checkpoint from epoch {start_epoch - 1}")
     if start_epoch > args.epochs:
         print(f"[eeg-wan] checkpoint already reached epoch {start_epoch - 1}; nothing to train")
+        return
+    if (
+        args.early_stop_patience > 0
+        and start_epoch - 1 >= args.min_epochs
+        and stale_epochs >= args.early_stop_patience
+    ):
+        print(
+            f"[eeg-wan] checkpoint already satisfies early stopping at epoch {start_epoch - 1}; "
+            "nothing to train",
+            flush=True,
+        )
         return
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
@@ -338,6 +484,9 @@ def main() -> None:
                 padding_weight=args.padding_weight,
                 length_weight=args.length_weight,
                 pooled_weight=args.pooled_weight,
+                contrastive_weight=args.contrastive_weight,
+                contrastive_temperature=args.contrastive_temperature,
+                positive_mask=video_positive_mask(batch["video_id"], device),
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -350,11 +499,20 @@ def main() -> None:
             padding_weight=args.padding_weight,
             length_weight=args.length_weight,
             pooled_weight=args.pooled_weight,
+            contrastive_weight=args.contrastive_weight,
+            contrastive_temperature=args.contrastive_temperature,
         )
         record = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"], "valid": valid}
         with history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
         print(f"[eeg-wan] epoch={epoch} valid={valid}", flush=True)
+        selection_value = float(valid[args.selection_metric])
+        improved = selection_value < best - args.early_stop_min_delta
+        if improved:
+            best = selection_value
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
         payload = {
             "config": asdict(config),
             "state_dict": model.state_dict(),
@@ -365,11 +523,28 @@ def main() -> None:
             "args": vars(args),
             "data_protocol": data_protocol,
             "loss_weights": loss_weights,
+            "early_stopping": {
+                "metric": args.selection_metric,
+                "best": best,
+                "stale_epochs": stale_epochs,
+                "patience": args.early_stop_patience,
+                "min_delta": args.early_stop_min_delta,
+            },
         }
         torch.save(payload, args.output_dir / "last.pt")
-        if valid["loss"] < best:
-            best = valid["loss"]
+        if improved:
             torch.save(payload, args.output_dir / "best.pt")
+        if (
+            args.early_stop_patience > 0
+            and epoch >= args.min_epochs
+            and stale_epochs >= args.early_stop_patience
+        ):
+            print(
+                f"[eeg-wan] early stop at epoch {epoch}: {args.selection_metric} did not improve "
+                f"by {args.early_stop_min_delta:g} for {stale_epochs} epochs",
+                flush=True,
+            )
+            break
     print(f"[eeg-wan] best checkpoint: {args.output_dir / 'best.pt'}")
 
 
