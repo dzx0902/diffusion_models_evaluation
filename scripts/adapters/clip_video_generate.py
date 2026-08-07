@@ -9,6 +9,17 @@ from typing import Any
 import torch
 
 
+def has_variant_weights(path: Path, variant: str) -> bool:
+    return any(path.glob(f"*.{variant}.*"))
+
+
+def pipeline_has_variant(model_root: Path, variant: str) -> bool:
+    return all(
+        has_variant_weights(model_root / component, variant)
+        for component in ("text_encoder", "unet", "vae")
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a CLIP-conditioned baseline video.")
     parser.add_argument("--backend", choices=["animatediff", "zeroscope"], required=True)
@@ -54,21 +65,24 @@ def load_pipeline(args: argparse.Namespace, dtype: torch.dtype) -> Any:
             raise ValueError("--motion-adapter is required for AnimateDiff")
         from diffusers import AnimateDiffPipeline, DDIMScheduler, MotionAdapter
 
-        adapter = MotionAdapter.from_pretrained(
-            args.motion_adapter,
-            torch_dtype=dtype,
-            variant="fp16",
-            local_files_only=True,
-        )
-        pipe = AnimateDiffPipeline.from_pretrained(
-            args.model_root,
-            motion_adapter=adapter,
-            torch_dtype=dtype,
-            variant="fp16",
-            safety_checker=None,
-            feature_extractor=None,
-            local_files_only=True,
-        )
+        adapter_options: dict[str, Any] = {
+            "torch_dtype": dtype,
+            "local_files_only": True,
+        }
+        if has_variant_weights(args.motion_adapter, "fp16"):
+            adapter_options["variant"] = "fp16"
+        adapter = MotionAdapter.from_pretrained(args.motion_adapter, **adapter_options)
+
+        pipeline_options: dict[str, Any] = {
+            "motion_adapter": adapter,
+            "torch_dtype": dtype,
+            "safety_checker": None,
+            "feature_extractor": None,
+            "local_files_only": True,
+        }
+        if pipeline_has_variant(args.model_root, "fp16"):
+            pipeline_options["variant"] = "fp16"
+        pipe = AnimateDiffPipeline.from_pretrained(args.model_root, **pipeline_options)
         pipe.scheduler = DDIMScheduler.from_config(
             pipe.scheduler.config,
             beta_schedule="linear",

@@ -24,6 +24,10 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def has_variant_weights(path: Path, variant: str) -> bool:
+    return any(path.glob(f"*.{variant}.*"))
+
+
 def encode_prompt(tokenizer: Any, text_encoder: Any, prompt: str) -> tuple[torch.Tensor, int]:
     max_length = int(tokenizer.model_max_length)
     inputs = tokenizer(
@@ -52,8 +56,11 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, local_files_only=True)
     load_options: dict[str, Any] = {"local_files_only": True, "torch_dtype": torch.float32}
-    if args.backend == "animatediff":
+    if args.backend == "animatediff" and has_variant_weights(text_encoder_dir, "fp16"):
         load_options["variant"] = "fp16"
+        print("[clip-targets] loading fp16 text-encoder variant", flush=True)
+    else:
+        print("[clip-targets] loading default text-encoder weights", flush=True)
     text_encoder = CLIPTextModel.from_pretrained(text_encoder_dir, **load_options).eval()
     records = read_jsonl(args.manifest)
     prompts = list(dict.fromkeys(str(record["caption"]) for record in records))
