@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import os
+import subprocess
 
 import pytest
 import torch
@@ -67,3 +69,19 @@ def test_encode_prompt_preserves_injected_tensor() -> None:
     assert positive is injected
     assert negative is not None
     assert pipe.kwargs["prompt_embeds"] is injected
+
+
+def test_clip_pipeline_import_does_not_require_opencv() -> None:
+    code = """
+import builtins
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == 'cv2' or name.startswith('cv2.'):
+        raise ModuleNotFoundError('blocked cv2 for import isolation test')
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+import ms_video_eval.clip_video_pipeline
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(SRC)
+    subprocess.run([sys.executable, "-c", code], check=True, env=environment)
