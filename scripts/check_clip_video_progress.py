@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib.metadata
 import json
 import os
@@ -29,6 +30,7 @@ def parse_args() -> argparse.Namespace:
         default=ROOT / "outputs" / "eeg_clip_video",
     )
     parser.add_argument("--fold", default="video_6fold_1")
+    parser.add_argument("--min-yolo-score", type=float, default=0.5)
     parser.add_argument("--json-output", type=Path, default=None)
     return parser.parse_args()
 
@@ -81,6 +83,24 @@ def latest_history(path: Path) -> dict[str, Any] | None:
     if error or not rows:
         return None
     return rows[-1]
+
+
+def read_yolo_scores(root: Path) -> tuple[dict[str, float], dict[str, float]]:
+    generated: dict[str, float] = {}
+    references: dict[str, float] = {}
+    if not root.is_dir():
+        return generated, references
+    for path in root.rglob("video_scores.csv"):
+        destination = references if "yolo_reference" in path.parts else generated
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    name = Path(row["video_file"]).name
+                    score = float(row["yolo_entity_score"])
+                    destination[name] = max(score, destination.get(name, float("-inf")))
+        except (KeyError, OSError, ValueError):
+            continue
+    return generated, references
 
 
 def format_size(size: int) -> str:
@@ -195,9 +215,23 @@ def main() -> None:
     valid_videos = [path for path in exact_videos if path.stat().st_size > 0]
     exact_ready = any("exact" in path.name.lower() for path in valid_videos)
     native_ready = any("native" in path.name.lower() for path in valid_videos)
+    generated_scores, reference_scores = read_yolo_scores(exact_root)
+    exact_scores = [score for name, score in generated_scores.items() if "exact" in name.lower()]
+    native_scores = [score for name, score in generated_scores.items() if "native" in name.lower()]
+    yolo_gate_scored = bool(exact_scores) and bool(native_scores)
+    yolo_gate_passed = (
+        yolo_gate_scored
+        and max(exact_scores) >= args.min_yolo_score
+        and max(native_scores) >= args.min_yolo_score
+    )
     report["generation_gate"] = {
         "exact_ready": exact_ready,
         "native_ready": native_ready,
+        "min_yolo_score": args.min_yolo_score,
+        "yolo_scored": yolo_gate_scored,
+        "yolo_passed": yolo_gate_passed,
+        "generated_yolo_scores": generated_scores,
+        "reference_yolo_scores": reference_scores,
         "videos": [
             {"path": str(path), "size": path.stat().st_size} for path in valid_videos
         ],
@@ -244,6 +278,10 @@ def main() -> None:
         next_stage = "GENERATE_EXACT_TARGET"
     elif not native_ready:
         next_stage = "GENERATE_NATIVE_CONTROL"
+    elif not yolo_gate_scored:
+        next_stage = "SCORE_GENERATION_GATE"
+    elif not yolo_gate_passed:
+        next_stage = "DIAGNOSE_GENERATION_GATE"
     elif not first_trained:
         next_stage = "TRAIN_CHENTIANLIN_PILOT"
     elif not matched_controls_ready:
@@ -280,6 +318,14 @@ def main() -> None:
         print(f"ERROR manifest={manifest_error} index={index_error} binding={bound_error}")
     print("=== GENERATION GATE ===")
     print(f"exact={exact_ready} native={native_ready} videos={len(valid_videos)}")
+    print(
+        f"yolo_scored={yolo_gate_scored} yolo_passed={yolo_gate_passed} "
+        f"threshold={args.min_yolo_score}"
+    )
+    for name, score in sorted(generated_scores.items()):
+        print(f"YOLO generated {name}: {score:.3f}")
+    for name, score in sorted(reference_scores.items()):
+        print(f"YOLO reference {name}: {score:.3f}")
     for row in report["generation_gate"]["videos"]:
         print(f"VIDEO {row['path']} ({format_size(row['size'])})")
     print("=== TRAINING ===")
