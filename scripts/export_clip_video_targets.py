@@ -3,11 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from ms_video_eval.clip_video_pipeline import (
+    encode_prompt_with_pipeline,
+    load_clip_video_pipeline,
+    pipeline_execution_device,
+    resolve_dtype,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -15,6 +29,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--model-root", type=Path, required=True)
     parser.add_argument("--backend", choices=["animatediff", "zeroscope"], required=True)
+    parser.add_argument("--motion-adapter", type=Path, default=None)
+    parser.add_argument(
+        "--dtype",
+        choices=["float16", "bfloat16", "float32"],
+        default="bfloat16",
+    )
+    parser.add_argument("--device", default="cuda")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -24,44 +45,31 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def has_variant_weights(path: Path, variant: str) -> bool:
-    return any(path.glob(f"*.{variant}.*"))
-
-
-def encode_prompt(tokenizer: Any, text_encoder: Any, prompt: str) -> tuple[torch.Tensor, int]:
-    max_length = int(tokenizer.model_max_length)
-    inputs = tokenizer(
+def semantic_token_count(pipe: Any, prompt: str) -> int:
+    inputs = pipe.tokenizer(
         prompt,
         padding="max_length",
-        max_length=max_length,
+        max_length=pipe.tokenizer.model_max_length,
         truncation=True,
         return_tensors="pt",
     )
-    attention_mask = None
-    if bool(getattr(text_encoder.config, "use_attention_mask", False)):
-        attention_mask = inputs.attention_mask
-    with torch.inference_mode():
-        latent = text_encoder(inputs.input_ids, attention_mask=attention_mask)[0].squeeze(0).float()
-    return latent, int(inputs.attention_mask.sum().item())
+    return int(inputs.attention_mask.sum().item())
 
 
 def main() -> None:
     args = parse_args()
-    from transformers import AutoTokenizer, CLIPTextModel
-
-    text_encoder_dir = args.model_root / "text_encoder"
-    tokenizer_dir = args.model_root / "tokenizer"
-    if not text_encoder_dir.is_dir() or not tokenizer_dir.is_dir():
-        raise FileNotFoundError(f"Expected text_encoder/ and tokenizer/ under {args.model_root}")
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, local_files_only=True)
-    load_options: dict[str, Any] = {"local_files_only": True, "torch_dtype": torch.float32}
-    if args.backend == "animatediff" and has_variant_weights(text_encoder_dir, "fp16"):
-        load_options["variant"] = "fp16"
-        print("[clip-targets] loading fp16 text-encoder variant", flush=True)
-    else:
-        print("[clip-targets] loading default text-encoder weights", flush=True)
-    text_encoder = CLIPTextModel.from_pretrained(text_encoder_dir, **load_options).eval()
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is not available")
+    dtype = resolve_dtype(args.dtype)
+    device = torch.device(args.device)
+    pipe = load_clip_video_pipeline(
+        backend=args.backend,
+        model_root=args.model_root,
+        motion_adapter=args.motion_adapter,
+        dtype=dtype,
+    )
+    pipe.to(device)
+    execution_device = pipeline_execution_device(pipe, device)
     records = read_jsonl(args.manifest)
     prompts = list(dict.fromkeys(str(record["caption"]) for record in records))
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -73,7 +81,15 @@ def main() -> None:
 
     index_rows: list[dict[str, Any]] = []
     for index, prompt in enumerate(prompts):
-        latent, semantic_tokens = encode_prompt(tokenizer, text_encoder, prompt)
+        with torch.inference_mode():
+            prompt_embeds, _ = encode_prompt_with_pipeline(
+                pipe,
+                prompt=prompt,
+                device=execution_device,
+                guidance_scale=1.0,
+            )
+        latent = prompt_embeds.squeeze(0).detach().cpu().float()
+        semantic_tokens = semantic_token_count(pipe, prompt)
         path = (latent_dir / f"{index:04d}.pt").resolve()
         payload = {
             "latent": latent,
@@ -82,6 +98,9 @@ def main() -> None:
             "prompt": prompt,
             "backend": args.backend,
             "model_root": str(args.model_root.resolve()),
+            "embedding_contract": "diffusers.pipeline.encode_prompt.v1",
+            "compute_dtype": args.dtype,
+            "pipeline_class": type(pipe).__name__,
         }
         torch.save(payload, path)
         index_rows.append(
@@ -92,6 +111,8 @@ def main() -> None:
                 "semantic_tokens": semantic_tokens,
                 "shape": list(latent.shape),
                 "backend": args.backend,
+                "embedding_contract": "diffusers.pipeline.encode_prompt.v1",
+                "compute_dtype": args.dtype,
             }
         )
         if (index + 1) % 50 == 0 or index + 1 == len(prompts):
@@ -107,7 +128,11 @@ def main() -> None:
         "video_count": len(records),
         "unique_prompt_count": len(prompts),
         "condition_shape": index_rows[0]["shape"] if index_rows else None,
-        "fixed_tokens": int(tokenizer.model_max_length),
+        "fixed_tokens": int(pipe.tokenizer.model_max_length),
+        "embedding_contract": "diffusers.pipeline.encode_prompt.v1",
+        "compute_dtype": args.dtype,
+        "pipeline_class": type(pipe).__name__,
+        "diffusers_version": importlib.metadata.version("diffusers"),
     }
     (args.output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(f"[clip-targets] wrote {index_path}", flush=True)

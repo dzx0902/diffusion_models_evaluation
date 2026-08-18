@@ -59,20 +59,29 @@ conda activate clip-video
 export FOLD=video_6fold_1
 export STRUCTURED_MANIFEST=data/manifests/structured_v2_video_manifest.jsonl
 export CLIP_ROOT=outputs/eeg_clip_video
+export ANIMATEDIFF_TARGET_ROOT="$CLIP_ROOT/animatediff/targets_pipeline_bf16"
+export ANIMATEDIFF_TARGETS="$CLIP_ROOT/animatediff/condition_targets_pipeline_bf16.jsonl"
 
 python scripts/export_clip_video_targets.py \
   --manifest "$STRUCTURED_MANIFEST" \
   --backend animatediff \
   --model-root "$MS_MODELS_ROOT/AnimateDiff/sd-v1-5" \
-  --output-dir "$CLIP_ROOT/animatediff/targets" \
+  --motion-adapter "$MS_MODELS_ROOT/AnimateDiff/motion-adapter-v1-5-2" \
+  --dtype bfloat16 --device cuda \
+  --output-dir "$ANIMATEDIFF_TARGET_ROOT" \
   --overwrite
 
 python scripts/build_eeg_wan_targets.py \
   --video-manifest "$STRUCTURED_MANIFEST" \
-  --latent-index "$CLIP_ROOT/animatediff/targets/index.jsonl" \
-  --output "$CLIP_ROOT/animatediff/condition_targets.jsonl" \
+  --latent-index "$ANIMATEDIFF_TARGET_ROOT/index.jsonl" \
+  --output "$ANIMATEDIFF_TARGETS" \
   --overwrite
 ```
+
+The exporter loads the complete Diffusers pipeline and calls its public
+`encode_prompt()` method. It does not instantiate a separate CLIP encoder and
+does not perform PCA. The older `animatediff/targets` directory is retained
+only for comparison and must not be used for new EEG training.
 
 For ZeroScope, change the backend/model/output paths:
 
@@ -91,7 +100,30 @@ python scripts/build_eeg_wan_targets.py \
   --overwrite
 ```
 
-## 4. Exact-Target Video Check
+## 4. Prompt-Embedding Injection Checks
+
+First verify native text and injection of the exact same in-memory tensor in
+one pipeline instance. This isolates the public `prompt_embeds` interface from
+serialization, a second text encoder, PCA, and EEG.
+
+```bash
+python scripts/validate_clip_video_condition_injection.py \
+  --backend animatediff \
+  --model-root "$MS_MODELS_ROOT/AnimateDiff/sd-v1-5" \
+  --motion-adapter "$MS_MODELS_ROOT/AnimateDiff/motion-adapter-v1-5-2" \
+  --prompt "A person kicks a ball." \
+  --negative-prompt "" \
+  --output-dir "$CLIP_ROOT/animatediff/injection_gate_bf16" \
+  --name 01-001 \
+  --dtype bfloat16 \
+  --height 512 --width 512 --num-frames 16 --fps 8 \
+  --steps 25 --guidance-scale 7.5 --seed 0 --enable-tf32
+
+cat "$CLIP_ROOT/animatediff/injection_gate_bf16/01-001_report.json"
+```
+
+`pixel_mae` and `pixel_rmse` should be zero or negligible. Only after this
+passes should serialized targets be checked.
 
 Before EEG training, generate native-text and exact-target videos with the
 same seed. The two outputs should be close; otherwise stop and fix condition
@@ -102,7 +134,7 @@ export VIDEO_ID=02-040
 export TARGET_PATH=$(python - "$VIDEO_ID" <<'PY'
 import json, sys
 video_id = sys.argv[1]
-for line in open("outputs/eeg_clip_video/animatediff/condition_targets.jsonl", encoding="utf-8"):
+for line in open("outputs/eeg_clip_video/animatediff/condition_targets_pipeline_bf16.jsonl", encoding="utf-8"):
     row = json.loads(line)
     if row["video_id"] == video_id:
         print(row["latent_path"])
@@ -132,7 +164,7 @@ export SPLIT_PLAN=outputs/eeg_wan_structured_v2/splits/chentianlin_video_6fold_p
 for SUBJECT in chentianlin duzhuoxuan; do
   python scripts/train_eeg_wan_conditioner.py \
     --trials "data/manifests/$SUBJECT/eeg_trials.csv" \
-    --targets "$CLIP_ROOT/animatediff/condition_targets.jsonl" \
+    --targets "$ANIMATEDIFF_TARGETS" \
     --split-plan "$SPLIT_PLAN" \
     --experiment "$FOLD" \
     --duration-sec 4 \
@@ -163,7 +195,7 @@ python scripts/run_clip_video_condition_controls.py \
   --motion-adapter "$MS_MODELS_ROOT/AnimateDiff/motion-adapter-v1-5-2" \
   --checkpoint "$CLIP_ROOT/animatediff/chentianlin/$FOLD/best.pt" \
   --trials data/manifests/chentianlin/eeg_trials.csv \
-  --targets "$CLIP_ROOT/animatediff/condition_targets.jsonl" \
+  --targets "$ANIMATEDIFF_TARGETS" \
   --manifest "$STRUCTURED_MANIFEST" \
   --video-id 02-040 --session session3 \
   --shuffled-video-id 01-041 --shuffled-session session3 \

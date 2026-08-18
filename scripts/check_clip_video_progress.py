@@ -62,6 +62,15 @@ def read_jsonl(path: Path) -> tuple[list[dict[str, Any]], str | None]:
     return rows, None
 
 
+def read_json(path: Path) -> tuple[dict[str, Any], str | None]:
+    if not path.is_file():
+        return {}, None
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except Exception as error:
+        return {}, str(error)
+
+
 def git_value(*args: str) -> str:
     try:
         return subprocess.check_output(
@@ -118,9 +127,20 @@ def main() -> None:
     output_root = args.output_root.expanduser()
     base = models_root / "AnimateDiff" / "sd-v1-5"
     motion = models_root / "AnimateDiff" / "motion-adapter-v1-5-2"
-    target_root = output_root / "animatediff" / "targets"
+    target_candidates = [
+        output_root / "animatediff" / "targets_pipeline_bf16",
+        output_root / "animatediff" / "targets",
+    ]
+    target_root = next((path for path in target_candidates if path.is_dir()), target_candidates[0])
     target_index = target_root / "index.jsonl"
-    condition_targets = output_root / "animatediff" / "condition_targets.jsonl"
+    condition_candidates = [
+        output_root / "animatediff" / "condition_targets_pipeline_bf16.jsonl",
+        output_root / "animatediff" / "condition_targets.jsonl",
+    ]
+    condition_targets = next(
+        (path for path in condition_candidates if path.is_file()),
+        condition_candidates[0],
+    )
     manifest_candidates = [
         ROOT / "data" / "manifests" / "structured_v2_video_manifest.jsonl",
         ROOT / "data" / "manifests" / "captions_simplified.jsonl",
@@ -183,8 +203,17 @@ def main() -> None:
     }
 
     index_rows, index_error = read_jsonl(target_index)
+    target_metadata, target_metadata_error = read_json(target_root / "metadata.json")
     index_shapes = sorted({tuple(row.get("shape", [])) for row in index_rows})
-    index_ready = bool(index_rows) and index_error is None and index_shapes == [(77, 768)]
+    embedding_contract = target_metadata.get("embedding_contract")
+    index_ready = (
+        bool(index_rows)
+        and index_error is None
+        and target_metadata_error is None
+        and index_shapes == [(77, 768)]
+        and embedding_contract == "diffusers.pipeline.encode_prompt.v1"
+        and all(row.get("embedding_contract") == embedding_contract for row in index_rows)
+    )
     bound_rows, bound_error = read_jsonl(condition_targets)
     bound_ids = [str(row.get("video_id")) for row in bound_rows]
     bound_paths_exist = bool(bound_rows) and all(
@@ -204,10 +233,30 @@ def main() -> None:
         "index_shapes": [list(shape) for shape in index_shapes],
         "index_error": index_error,
         "index_ready": index_ready,
+        "embedding_contract": embedding_contract,
+        "compute_dtype": target_metadata.get("compute_dtype"),
+        "metadata_error": target_metadata_error,
         "condition_target_rows": len(bound_rows),
         "condition_target_error": bound_error,
         "condition_paths_exist": bound_paths_exist,
         "binding_ready": binding_ready,
+    }
+
+    injection_root = output_root / "animatediff" / "injection_gate_bf16"
+    injection_reports: list[dict[str, Any]] = []
+    for path in sorted(injection_root.glob("*_report.json")) if injection_root.is_dir() else []:
+        payload, error = read_json(path)
+        injection_reports.append({"path": str(path), "payload": payload, "error": error})
+    injection_passed = any(
+        row["error"] is None
+        and float(row["payload"].get("pixel_rmse", float("inf"))) <= 1.0
+        and float(row["payload"].get("native_std", 0.0)) > 10.0
+        and float(row["payload"].get("injected_std", 0.0)) > 10.0
+        for row in injection_reports
+    )
+    report["injection_gate"] = {
+        "passed": injection_passed,
+        "reports": injection_reports,
     }
 
     exact_root = output_root / "animatediff" / "exact_check"
@@ -270,6 +319,8 @@ def main() -> None:
         next_stage = "MODEL_DOWNLOAD_OR_LAYOUT"
     elif not environment_ready:
         next_stage = "INSTALL_CLIP_VIDEO_ENV"
+    elif not injection_passed:
+        next_stage = "VALIDATE_PROMPT_EMBED_INJECTION"
     elif not index_ready:
         next_stage = "EXPORT_CLIP_TARGETS"
     elif not binding_ready:
@@ -312,10 +363,23 @@ def main() -> None:
     print(
         f"manifest_videos={expected_videos} index_rows={len(index_rows)} "
         f"shapes={report['targets']['index_shapes']} bound_rows={len(bound_rows)} "
-        f"paths_exist={bound_paths_exist}"
+        f"paths_exist={bound_paths_exist} contract={embedding_contract} "
+        f"dtype={target_metadata.get('compute_dtype')}"
     )
-    if index_error or bound_error or manifest_error:
-        print(f"ERROR manifest={manifest_error} index={index_error} binding={bound_error}")
+    if index_error or bound_error or manifest_error or target_metadata_error:
+        print(
+            f"ERROR manifest={manifest_error} index={index_error} "
+            f"metadata={target_metadata_error} binding={bound_error}"
+        )
+    print("=== INJECTION GATE ===")
+    print(f"passed={injection_passed} reports={len(injection_reports)}")
+    for row in injection_reports:
+        payload = row["payload"]
+        print(
+            f"REPORT {row['path']} error={row['error']} "
+            f"rmse={payload.get('pixel_rmse')} native_std={payload.get('native_std')} "
+            f"injected_std={payload.get('injected_std')}"
+        )
     print("=== GENERATION GATE ===")
     print(f"exact={exact_ready} native={native_ready} videos={len(valid_videos)}")
     print(

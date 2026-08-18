@@ -4,20 +4,21 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
+import sys
 
 import torch
 
+ROOT = Path(__file__).resolve().parents[2]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-def has_variant_weights(path: Path, variant: str) -> bool:
-    return any(path.glob(f"*.{variant}.*"))
-
-
-def pipeline_has_variant(model_root: Path, variant: str) -> bool:
-    return all(
-        has_variant_weights(model_root / component, variant)
-        for component in ("text_encoder", "unet", "vae")
-    )
+from ms_video_eval.clip_video_pipeline import (
+    encode_prompt_with_pipeline,
+    load_clip_video_pipeline,
+    pipeline_execution_device,
+    resolve_dtype,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,68 +48,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def encode_negative(pipe: Any, prompt: str, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    inputs = pipe.tokenizer(
-        prompt,
-        padding="max_length",
-        max_length=pipe.tokenizer.model_max_length,
-        truncation=True,
-        return_tensors="pt",
-    )
-    attention_mask = None
-    if bool(getattr(pipe.text_encoder.config, "use_attention_mask", False)):
-        attention_mask = inputs.attention_mask.to(device)
-    with torch.inference_mode():
-        return pipe.text_encoder(
-            inputs.input_ids.to(device),
-            attention_mask=attention_mask,
-        )[0].to(dtype=dtype)
-
-
-def load_pipeline(args: argparse.Namespace, dtype: torch.dtype) -> Any:
-    if args.backend == "animatediff":
-        if args.motion_adapter is None:
-            raise ValueError("--motion-adapter is required for AnimateDiff")
-        from diffusers import AnimateDiffPipeline, DDIMScheduler, MotionAdapter
-
-        adapter_options: dict[str, Any] = {
-            "torch_dtype": dtype,
-            "local_files_only": True,
-        }
-        if has_variant_weights(args.motion_adapter, "fp16"):
-            adapter_options["variant"] = "fp16"
-        adapter = MotionAdapter.from_pretrained(args.motion_adapter, **adapter_options)
-
-        pipeline_options: dict[str, Any] = {
-            "motion_adapter": adapter,
-            "torch_dtype": dtype,
-            "safety_checker": None,
-            "feature_extractor": None,
-            "local_files_only": True,
-        }
-        if pipeline_has_variant(args.model_root, "fp16"):
-            pipeline_options["variant"] = "fp16"
-        pipe = AnimateDiffPipeline.from_pretrained(args.model_root, **pipeline_options)
-        pipe.scheduler = DDIMScheduler.from_config(
-            pipe.scheduler.config,
-            beta_schedule="linear",
-            clip_sample=False,
-            timestep_spacing="linspace",
-            steps_offset=1,
-        )
-        return pipe
-
-    from diffusers import DPMSolverMultistepScheduler, DiffusionPipeline
-
-    pipe = DiffusionPipeline.from_pretrained(
-        args.model_root,
-        torch_dtype=dtype,
-        local_files_only=True,
-    )
-    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-    return pipe
-
-
 def main() -> None:
     args = parse_args()
     if (args.prompt is None) == (args.condition is None):
@@ -120,12 +59,13 @@ def main() -> None:
         torch.backends.cudnn.allow_tf32 = True
 
     device = torch.device("cuda")
-    dtype = {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-    }[args.dtype]
-    pipe = load_pipeline(args, dtype)
+    dtype = resolve_dtype(args.dtype)
+    pipe = load_clip_video_pipeline(
+        backend=args.backend,
+        model_root=args.model_root,
+        motion_adapter=args.motion_adapter,
+        dtype=dtype,
+    )
     pipe.enable_vae_slicing()
     if args.cpu_offload:
         pipe.enable_model_cpu_offload()
@@ -154,15 +94,19 @@ def main() -> None:
             raise ValueError(
                 f"Condition shape={tuple(latent.shape)}, expected={(expected_tokens, expected_dim)}"
             )
-        execution_device = getattr(pipe, "_execution_device", device)
+        execution_device = pipeline_execution_device(pipe, device)
         prompt_embeds = latent.unsqueeze(0).to(device=execution_device, dtype=dtype)
-        call_args["prompt_embeds"] = prompt_embeds
-        call_args["negative_prompt_embeds"] = encode_negative(
+        prompt_embeds, negative_prompt_embeds = encode_prompt_with_pipeline(
             pipe,
-            args.negative_prompt,
-            execution_device,
-            dtype,
+            prompt=None,
+            device=execution_device,
+            guidance_scale=args.guidance_scale,
+            negative_prompt=args.negative_prompt,
+            prompt_embeds=prompt_embeds,
         )
+        call_args["prompt_embeds"] = prompt_embeds
+        if negative_prompt_embeds is not None:
+            call_args["negative_prompt_embeds"] = negative_prompt_embeds
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     frames = pipe(**call_args).frames[0]
