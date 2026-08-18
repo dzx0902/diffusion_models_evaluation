@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--steps", type=int, default=25)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--dtype",
+        choices=["float16", "bfloat16", "float32"],
+        default="float16",
+    )
     parser.add_argument("--cpu-offload", action="store_true")
     parser.add_argument("--enable-tf32", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
@@ -70,6 +75,7 @@ def main() -> None:
         "--fps", str(args.fps),
         "--steps", str(args.steps),
         "--seed", str(args.seed),
+        "--dtype", args.dtype,
     ]
     if args.motion_adapter is not None:
         common_generate.extend(["--motion-adapter", str(args.motion_adapter)])

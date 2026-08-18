@@ -3,6 +3,9 @@
 This pipeline compares the existing Wan PCA condition against native fixed
 CLIP conditions used by video diffusion models. AnimateDiff uses `[77,768]`
 and ZeroScope uses `[77,1024]`. Neither path uses PCA or predicts token length.
+Use `bfloat16` for AnimateDiff on supported NVIDIA GPUs when the FP16
+MotionAdapter path produces low-contrast dark frames. Confirm this with a
+matched prompt and seed before changing the experiment-wide dtype.
 
 ## 1. Download Models Directly To Local Storage
 
@@ -113,6 +116,7 @@ python scripts/adapters/clip_video_generate.py \
   --motion-adapter "$MS_MODELS_ROOT/AnimateDiff/motion-adapter-v1-5-2" \
   --condition "$TARGET_PATH" \
   --output "outputs/eeg_clip_video/animatediff/exact_${VIDEO_ID}.mp4" \
+  --dtype bfloat16 \
   --num-frames 32 --fps 8 --steps 25 --seed 0 --enable-tf32
 ```
 
@@ -165,6 +169,7 @@ python scripts/run_clip_video_condition_controls.py \
   --shuffled-video-id 01-041 --shuffled-session session3 \
   --duration-sec 4 \
   --output-dir "$CLIP_ROOT/animatediff/controls/02-040" \
+  --dtype bfloat16 \
   --num-frames 32 --fps 8 --steps 25 --seed 0 \
   --enable-tf32 --skip-existing
 ```

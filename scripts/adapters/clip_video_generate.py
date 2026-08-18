@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=25)
     parser.add_argument("--guidance-scale", type=float, default=7.5)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--dtype",
+        choices=["float16", "bfloat16", "float32"],
+        default="float16",
+        help="Pipeline compute dtype. AnimateDiff may require bfloat16 to avoid dark-frame collapse.",
+    )
     parser.add_argument("--cpu-offload", action="store_true")
     parser.add_argument("--enable-tf32", action="store_true")
     return parser.parse_args()
@@ -114,7 +120,11 @@ def main() -> None:
         torch.backends.cudnn.allow_tf32 = True
 
     device = torch.device("cuda")
-    dtype = torch.float16
+    dtype = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }[args.dtype]
     pipe = load_pipeline(args, dtype)
     pipe.enable_vae_slicing()
     if args.cpu_offload:
