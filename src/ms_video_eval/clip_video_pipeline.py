@@ -26,9 +26,21 @@ def has_variant_weights(path: Path, variant: str) -> bool:
     return any(path.glob(f"*.{variant}.*"))
 
 
-def pipeline_has_variant(model_root: Path, variant: str) -> bool:
+def has_default_weights(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    return any(
+        item.is_file()
+        and item.suffix in {".bin", ".safetensors"}
+        and ".fp16." not in item.name
+        for item in path.iterdir()
+    )
+
+
+def pipeline_requires_variant(model_root: Path, variant: str) -> bool:
     return all(
-        has_variant_weights(model_root / component, variant)
+        not has_default_weights(model_root / component)
+        and has_variant_weights(model_root / component, variant)
         for component in ("text_encoder", "unet", "vae")
     )
 
@@ -50,7 +62,7 @@ def load_clip_video_pipeline(
             "torch_dtype": dtype,
             "local_files_only": True,
         }
-        if has_variant_weights(motion_adapter, "fp16"):
+        if not has_default_weights(motion_adapter) and has_variant_weights(motion_adapter, "fp16"):
             adapter_options["variant"] = "fp16"
         adapter = MotionAdapter.from_pretrained(motion_adapter, **adapter_options)
 
@@ -59,7 +71,7 @@ def load_clip_video_pipeline(
             "torch_dtype": dtype,
             "local_files_only": True,
         }
-        if pipeline_has_variant(model_root, "fp16"):
+        if pipeline_requires_variant(model_root, "fp16"):
             pipeline_options["variant"] = "fp16"
         pipe = AnimateDiffPipeline.from_pretrained(model_root, **pipeline_options)
         pipe.scheduler = DDIMScheduler.from_config(
