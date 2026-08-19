@@ -139,6 +139,21 @@ class EEGConditioner(nn.Module):
         return self.frequency_projection(features)
 
 
+def add_condition_offset(
+    predicted: torch.Tensor,
+    offset: torch.Tensor | None,
+) -> torch.Tensor:
+    """Reconstruct an absolute condition from a predicted residual."""
+    if offset is None:
+        return predicted
+    if offset.ndim != 2 or tuple(offset.shape) != tuple(predicted.shape[-2:]):
+        raise ValueError(
+            f"Condition offset shape={tuple(offset.shape)} does not match "
+            f"prediction tail={tuple(predicted.shape[-2:])}"
+        )
+    return predicted + offset.to(device=predicted.device, dtype=predicted.dtype)
+
+
 def fixed_pca_loss(
     predicted: torch.Tensor,
     target: torch.Tensor,

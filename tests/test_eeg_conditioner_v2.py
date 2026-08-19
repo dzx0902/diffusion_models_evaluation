@@ -14,10 +14,27 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from train_eeg_wan_conditioner import VideoGroupedBatchSampler, history_early_stop_state
-from src.ms_video_eval.eeg_conditioner import EEGConditioner, EEGConditionerConfig, fixed_pca_loss
+from src.ms_video_eval.eeg_conditioner import (
+    EEGConditioner,
+    EEGConditionerConfig,
+    add_condition_offset,
+    fixed_pca_loss,
+)
 
 
 class EEGConditionerV2Test(unittest.TestCase):
+    def test_condition_offset_reconstructs_absolute_target(self) -> None:
+        residual = torch.randn(2, 7, 8)
+        mean = torch.randn(7, 8)
+
+        reconstructed = add_condition_offset(residual, mean)
+
+        torch.testing.assert_close(reconstructed, residual + mean)
+
+    def test_condition_offset_rejects_incompatible_shape(self) -> None:
+        with self.assertRaises(ValueError):
+            add_condition_offset(torch.randn(2, 7, 8), torch.randn(6, 8))
+
     def test_multiscale_condition_shape(self) -> None:
         config = EEGConditionerConfig(
             channels=4,

@@ -20,7 +20,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ms_video_eval.eeg_conditioner import EEGConditioner, EEGConditionerConfig
+from ms_video_eval.eeg_conditioner import EEGConditioner, EEGConditionerConfig, add_condition_offset
 from ms_video_eval.eeg_protocol import filter_trial_duration
 
 
@@ -97,6 +97,9 @@ def main() -> None:
     config = EEGConditionerConfig(**checkpoint["config"])
     model = EEGConditioner(config).to(device).eval()
     model.load_state_dict(checkpoint["state_dict"])
+    condition_offset = checkpoint.get("target_mean")
+    if condition_offset is not None:
+        condition_offset = condition_offset.float().cpu()
     target_cache: dict[str, dict[str, Any]] = {}
     trial_metrics: list[dict[str, Any]] = []
 
@@ -109,14 +112,14 @@ def main() -> None:
         target_tokens = int(target["tokens"])
         with torch.inference_mode():
             predicted, logits = model(load_trial(row).to(device))
+            predicted = add_condition_offset(predicted, condition_offset)
         predicted = predicted.squeeze(0).float().cpu()
         predicted_tokens = int(logits.argmax(dim=-1).item() + config.min_tokens)
         confidence = float(logits.softmax(dim=-1).max().item())
         valid = min(target_tokens, predicted.shape[0])
         cosine = float(F.cosine_similarity(predicted[:valid].mean(0), target_latent[:valid].mean(0), dim=0).item())
         mse = float((predicted[:valid] - target_latent[:valid]).square().mean().item())
-        trial_metrics.append(
-            {
+        metrics = {
                 "video_id": video_id,
                 "session": row["session"],
                 "trial_index": int(row["trial_index"]),
@@ -128,7 +131,16 @@ def main() -> None:
                 "valid_latent_mse": mse,
                 "pooled_cosine": cosine,
             }
-        )
+        if condition_offset is not None:
+            metrics["mean_baseline_mse"] = float(F.mse_loss(condition_offset, target_latent).item())
+            metrics["mean_baseline_pooled_cosine"] = float(
+                F.cosine_similarity(condition_offset.mean(0), target_latent.mean(0), dim=0).item()
+            )
+            metrics["mse_improvement_over_mean"] = metrics["mean_baseline_mse"] - mse
+            metrics["cosine_improvement_over_mean"] = (
+                cosine - metrics["mean_baseline_pooled_cosine"]
+            )
+        trial_metrics.append(metrics)
         if index % 25 == 0 or index == len(trials):
             print(f"[eeg-wan-rank] {index}/{len(trials)}", flush=True)
 
@@ -188,6 +200,19 @@ def main() -> None:
         "top_videos": video_metrics[:10],
         "representatives": representatives,
     }
+    if condition_offset is not None:
+        summary.update({
+            "mean_baseline_mse": float(np.mean([row["mean_baseline_mse"] for row in trial_metrics])),
+            "mean_baseline_pooled_cosine": float(
+                np.mean([row["mean_baseline_pooled_cosine"] for row in trial_metrics])
+            ),
+            "mean_mse_improvement_over_mean": float(
+                np.mean([row["mse_improvement_over_mean"] for row in trial_metrics])
+            ),
+            "mean_cosine_improvement_over_mean": float(
+                np.mean([row["cosine_improvement_over_mean"] for row in trial_metrics])
+            ),
+        })
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2), flush=True)
 

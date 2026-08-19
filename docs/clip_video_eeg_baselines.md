@@ -170,6 +170,7 @@ for SUBJECT in chentianlin duzhuoxuan; do
     --duration-sec 4 \
     --slots 77 --latent-dim 768 --min-tokens 77 --max-tokens 77 \
     --architecture multiscale --sample-points 800 --sampling-rate 200 \
+    --target-centering \
     --group-sessions --batch-size 12 \
     --hidden-dim 256 --encoder-layers 2 --decoder-layers 2 \
     --length-weight 0 --pooled-weight 0.2 \
@@ -178,9 +179,16 @@ for SUBJECT in chentianlin duzhuoxuan; do
     --epochs 40 --min-epochs 10 \
     --early-stop-patience 6 --early-stop-min-delta 0.001 \
     --workers 0 \
-    --output-dir "$CLIP_ROOT/animatediff/$SUBJECT/$FOLD"
+    --output-dir "$CLIP_ROOT/animatediff/centered/$SUBJECT/$FOLD"
 done
 ```
+
+`--target-centering` stores the mean condition of unique training videos in
+the checkpoint and trains the network to predict only an EEG-specific
+residual. Epoch zero is the exact train-mean baseline and is retained as
+`best.pt` unless a later epoch improves the selected validation metric.
+Prediction and ranking scripts apply the stored mean automatically and report
+improvement over this baseline.
 
 ZeroScope uses the same command with `--latent-dim 1024` and its own target and
 output paths. Start ZeroScope only after the AnimateDiff exact-target and EEG

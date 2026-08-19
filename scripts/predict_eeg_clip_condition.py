@@ -19,7 +19,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ms_video_eval.eeg_conditioner import EEGConditioner, EEGConditionerConfig
+from ms_video_eval.eeg_conditioner import EEGConditioner, EEGConditionerConfig, add_condition_offset
 from ms_video_eval.eeg_protocol import trial_duration
 
 
@@ -97,6 +97,7 @@ def main() -> None:
     signal = (signal - signal.mean(axis=1, keepdims=True)) / (signal.std(axis=1, keepdims=True) + 1e-6)
     with torch.inference_mode():
         predicted, _ = model(torch.from_numpy(signal).unsqueeze(0).to(device))
+        predicted = add_condition_offset(predicted, checkpoint.get("target_mean"))
     predicted = predicted.squeeze(0).float().cpu()
 
     if args.condition_source == "target":

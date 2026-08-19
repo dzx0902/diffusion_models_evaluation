@@ -26,7 +26,12 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ms_video_eval.eeg_conditioner import EEGConditioner, EEGConditionerConfig, fixed_pca_loss
+from ms_video_eval.eeg_conditioner import (
+    EEGConditioner,
+    EEGConditionerConfig,
+    add_condition_offset,
+    fixed_pca_loss,
+)
 from ms_video_eval.eeg_protocol import filter_trial_duration
 
 
@@ -89,6 +94,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=None, help="Defaults to the maximum training-target length.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--target-centering",
+        action="store_true",
+        help="Predict a residual over the mean condition of unique training videos.",
+    )
     return parser.parse_args()
 
 
@@ -102,6 +112,24 @@ def read_targets(path: Path) -> dict[str, dict[str, Any]]:
             raise ValueError(f"duplicate target video_id: {row['video_id']}")
         targets[row["video_id"]] = row
     return targets
+
+
+def compute_target_mean(
+    targets: dict[str, dict[str, Any]],
+    video_ids: set[str],
+    slots: int,
+    latent_dim: int,
+) -> torch.Tensor:
+    latents = []
+    for video_id in sorted(video_ids):
+        payload = torch.load(targets[video_id]["latent_path"], map_location="cpu", weights_only=True)
+        latent = payload["latent"].float()
+        if tuple(latent.shape) != (slots, latent_dim):
+            raise ValueError(f"Invalid target shape for {video_id}: {tuple(latent.shape)}")
+        latents.append(latent)
+    if not latents:
+        raise ValueError("Cannot compute a target mean from an empty training-video set")
+    return torch.stack(latents).mean(dim=0)
 
 
 def resolve_split(args: argparse.Namespace) -> tuple[set[str], set[str], set[str] | None, set[str] | None]:
@@ -237,6 +265,7 @@ def evaluate(
     pooled_weight: float,
     contrastive_weight: float,
     contrastive_temperature: float,
+    condition_offset: torch.Tensor | None = None,
 ) -> dict[str, float]:
     model.eval()
     aggregate = {"loss": 0.0, "valid_mse": 0.0, "padding_mse": 0.0, "length_ce": 0.0, "pooled_cosine_loss": 0.0, "contrastive_loss": 0.0, "length_accuracy": 0.0}
@@ -244,6 +273,7 @@ def evaluate(
     with torch.no_grad():
         for batch in loader:
             predicted, logits = model(batch["eeg"].to(device))
+            predicted = add_condition_offset(predicted, condition_offset)
             lengths = batch["tokens"].to(device)
             _, values = fixed_pca_loss(
                 predicted,
@@ -335,6 +365,16 @@ def main() -> None:
         architecture=args.architecture, sampling_rate=args.sampling_rate,
     )
     model = EEGConditioner(config).to(device)
+    condition_offset = None
+    if args.target_centering:
+        condition_offset = compute_target_mean(
+            targets,
+            {row["video_id"] for row in train_rows},
+            args.slots,
+            latent_dim,
+        ).to(device)
+        torch.nn.init.zeros_(model.latent_head[-1].weight)
+        torch.nn.init.zeros_(model.latent_head[-1].bias)
     data_protocol = {
         "duration_sec": args.duration_sec,
         "all_trial_count": len(all_rows),
@@ -344,6 +384,7 @@ def main() -> None:
         "train_video_count": len({row["video_id"] for row in train_rows}),
         "validation_video_count": len({row["video_id"] for row in val_rows}),
         "group_sessions": args.group_sessions,
+        "target_centering": args.target_centering,
     }
     loss_weights = {
         "padding_weight": args.padding_weight,
@@ -393,6 +434,9 @@ def main() -> None:
         checkpoint_config = EEGConditionerConfig(**checkpoint["config"])
         model = EEGConditioner(checkpoint_config).to(device)
         model.load_state_dict(checkpoint["state_dict"])
+        condition_offset = checkpoint.get("target_mean")
+        if condition_offset is not None:
+            condition_offset = condition_offset.to(device)
         result = evaluate(
             model,
             val_loader,
@@ -402,6 +446,7 @@ def main() -> None:
             pooled_weight=args.pooled_weight,
             contrastive_weight=args.contrastive_weight,
             contrastive_temperature=args.contrastive_temperature,
+            condition_offset=condition_offset,
         )
         print(f"[eeg-wan] checkpoint={args.checkpoint} evaluation={result}")
         return
@@ -419,6 +464,43 @@ def main() -> None:
         args.early_stop_min_delta,
     )
     start_epoch = 1
+    if args.target_centering and not history_path.exists() and args.resume is None:
+        baseline_valid = evaluate(
+            model,
+            val_loader,
+            device,
+            padding_weight=args.padding_weight,
+            length_weight=args.length_weight,
+            pooled_weight=args.pooled_weight,
+            contrastive_weight=args.contrastive_weight,
+            contrastive_temperature=args.contrastive_temperature,
+            condition_offset=condition_offset,
+        )
+        best = float(baseline_valid[args.selection_metric])
+        baseline_payload = {
+            "config": asdict(config),
+            "state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "epoch": 0,
+            "valid": baseline_valid,
+            "args": vars(args),
+            "data_protocol": data_protocol,
+            "loss_weights": loss_weights,
+            "early_stopping": {
+                "metric": args.selection_metric,
+                "best": best,
+                "stale_epochs": 0,
+                "patience": args.early_stop_patience,
+                "min_delta": args.early_stop_min_delta,
+            },
+            "target_mean": condition_offset.detach().cpu(),
+        }
+        with history_path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"epoch": 0, "lr": optimizer.param_groups[0]["lr"], "valid": baseline_valid}) + "\n")
+        torch.save(baseline_payload, args.output_dir / "best.pt")
+        torch.save(baseline_payload, args.output_dir / "last.pt")
+        print(f"[eeg-wan] epoch=0 mean baseline={baseline_valid}", flush=True)
     if args.resume is not None:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         checkpoint_config = EEGConditionerConfig(**checkpoint["config"])
@@ -436,6 +518,13 @@ def main() -> None:
                 "Resume loss weights differ from the current objective: "
                 f"{checkpoint_weights} != {loss_weights}"
             )
+        checkpoint_mean = checkpoint.get("target_mean")
+        if (checkpoint_mean is None) != (condition_offset is None):
+            raise ValueError("Resume target-centering mode differs from the checkpoint")
+        if checkpoint_mean is not None and not torch.allclose(
+            checkpoint_mean.cpu(), condition_offset.cpu(), atol=1e-6, rtol=1e-6
+        ):
+            raise ValueError("Resume target mean differs from the current training split")
         checkpoint_early_stopping = checkpoint.get("early_stopping")
         if checkpoint_early_stopping is not None:
             if checkpoint_early_stopping["metric"] != args.selection_metric:
@@ -475,6 +564,7 @@ def main() -> None:
         for batch in train_loader:
             optimizer.zero_grad(set_to_none=True)
             predicted, logits = model(batch["eeg"].to(device))
+            predicted = add_condition_offset(predicted, condition_offset)
             loss, _ = fixed_pca_loss(
                 predicted,
                 batch["latent"].to(device),
@@ -501,6 +591,7 @@ def main() -> None:
             pooled_weight=args.pooled_weight,
             contrastive_weight=args.contrastive_weight,
             contrastive_temperature=args.contrastive_temperature,
+            condition_offset=condition_offset,
         )
         record = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"], "valid": valid}
         with history_path.open("a", encoding="utf-8") as handle:
@@ -530,6 +621,7 @@ def main() -> None:
                 "patience": args.early_stop_patience,
                 "min_delta": args.early_stop_min_delta,
             },
+            "target_mean": condition_offset.detach().cpu() if condition_offset is not None else None,
         }
         torch.save(payload, args.output_dir / "last.pt")
         if improved:
