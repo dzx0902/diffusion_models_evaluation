@@ -96,7 +96,7 @@ class EEGConditioner(nn.Module):
             nn.Linear(config.hidden_dim, config.max_tokens - config.min_tokens + 1),
         )
 
-    def forward(self, eeg: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode(self, eeg: torch.Tensor) -> torch.Tensor:
         if eeg.ndim != 3 or eeg.shape[1] != self.config.channels:
             raise ValueError(f"Expected [batch, {self.config.channels}, time], got {tuple(eeg.shape)}")
         if eeg.shape[-1] != self.config.sample_points:
@@ -106,7 +106,10 @@ class EEGConditioner(nn.Module):
         if self.config.architecture == "multiscale":
             frequency_tokens = self._frequency_tokens(eeg) + self.frequency_type
             tokens = torch.cat([tokens, frequency_tokens], dim=1)
-        tokens = self.encoder(tokens)
+        return self.encoder(tokens)
+
+    def forward(self, eeg: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        tokens = self.encode(eeg)
         queries = self.queries.unsqueeze(0).expand(tokens.shape[0], -1, -1)
         for block in self.decoder:
             queries = block(queries, tokens)
@@ -137,6 +140,25 @@ class EEGConditioner(nn.Module):
         features = torch.stack(band_power, dim=-1)
         features = features.permute(0, 2, 1, 3).flatten(start_dim=2)
         return self.frequency_projection(features)
+
+
+class EEGCategoryProbe(nn.Module):
+    """Lightweight category classifier over the shared EEG encoder."""
+
+    def __init__(self, config: EEGConditionerConfig, classes: int) -> None:
+        super().__init__()
+        if classes < 2:
+            raise ValueError("EEG category probe requires at least two classes")
+        self.config = config
+        self.classes = classes
+        self.backbone = EEGConditioner(config)
+        self.head = nn.Sequential(
+            nn.LayerNorm(config.hidden_dim),
+            nn.Linear(config.hidden_dim, classes),
+        )
+
+    def forward(self, eeg: torch.Tensor) -> torch.Tensor:
+        return self.head(self.backbone.encode(eeg).mean(dim=1))
 
 
 def add_condition_offset(

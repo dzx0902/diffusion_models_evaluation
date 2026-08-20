@@ -190,6 +190,23 @@ residual. Epoch zero is the exact train-mean baseline and is retained as
 Prediction and ranking scripts apply the stored mean automatically and report
 improvement over this baseline.
 
+If centered regression does not beat epoch zero, stop video generation and run
+the six-class diagnostic first. It uses the same held-out video fold and only
+the 4-second categories 01--06; chance accuracy is 16.67%.
+
+```bash
+python scripts/train_eeg_category_probe.py \
+  --trials data/manifests/chentianlin/eeg_trials.csv \
+  --split-plan outputs/eeg_wan_structured_v2/splits/chentianlin_video_6fold_plan.json \
+  --experiment video_6fold_1 --duration-sec 4 \
+  --epochs 30 --min-epochs 8 --early-stop-patience 6 \
+  --output-dir outputs/eeg_clip_video/category_probe/chentianlin/video_6fold_1
+```
+
+The resulting `report.json` contains validation/test top-1 accuracy, macro
+accuracy, per-class recall, and the confusion matrix. Accuracy near chance
+means the EEG pipeline must be fixed before another text-space regression run.
+
 ZeroScope uses the same command with `--latent-dim 1024` and its own target and
 output paths. Start ZeroScope only after the AnimateDiff exact-target and EEG
 pilot pass.
