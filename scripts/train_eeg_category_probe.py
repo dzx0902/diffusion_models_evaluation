@@ -22,7 +22,6 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ms_video_eval.eeg_classifiers import build_eeg_classifier
 from ms_video_eval.eeg_conditioner import EEGCategoryProbe, EEGConditionerConfig
 from ms_video_eval.eeg_protocol import filter_trial_duration
 
@@ -34,11 +33,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiment", required=True)
     parser.add_argument("--duration-sec", type=float, default=4.0)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument(
-        "--model",
-        choices=("mlp", "eegnet", "shallownet", "deepnet", "tsconv", "conformer", "multiscale"),
-        default="multiscale",
-    )
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--min-epochs", type=int, default=8)
@@ -121,10 +115,9 @@ def classification_metrics(
 
 
 def evaluate(
-    model: nn.Module,
+    model: EEGCategoryProbe,
     loader: DataLoader,
     device: torch.device,
-    classes: int,
 ) -> dict[str, Any]:
     model.eval()
     loss_sum = 0.0
@@ -136,7 +129,7 @@ def evaluate(
             loss_sum += float(nn.functional.cross_entropy(logits, target.to(device), reduction="sum"))
             predictions.extend(logits.argmax(dim=-1).cpu().tolist())
             labels.extend(target.tolist())
-    metrics = classification_metrics(predictions, labels, classes)
+    metrics = classification_metrics(predictions, labels, model.classes)
     metrics["loss"] = loss_sum / len(labels)
     metrics["samples"] = len(labels)
     return metrics
@@ -186,18 +179,7 @@ def main() -> None:
         architecture="multiscale",
         sampling_rate=args.sampling_rate,
     )
-    if args.model == "multiscale":
-        model = EEGCategoryProbe(config, len(categories))
-    else:
-        model = build_eeg_classifier(
-            args.model,
-            len(categories),
-            channels=config.channels,
-            samples=args.sample_points,
-            sampling_rate=args.sampling_rate,
-        )
-    model = model.to(device)
-    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    model = EEGCategoryProbe(config, len(categories)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -226,7 +208,7 @@ def main() -> None:
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
         scheduler.step()
-        validation = evaluate(model, loaders["validation"], device, len(categories))
+        validation = evaluate(model, loaders["validation"], device)
         improved = validation["macro_accuracy"] > best + args.early_stop_min_delta
         if improved:
             best = float(validation["macro_accuracy"])
@@ -238,8 +220,6 @@ def main() -> None:
             handle.write(json.dumps(record) + "\n")
         payload = {
             "config": asdict(config),
-            "model": args.model,
-            "parameter_count": parameter_count,
             "classes": categories,
             "state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
@@ -258,10 +238,8 @@ def main() -> None:
 
     checkpoint = torch.load(args.output_dir / "best.pt", map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["state_dict"])
-    test = evaluate(model, loaders["test"], device, len(categories))
+    test = evaluate(model, loaders["test"], device)
     report = {
-        "model": args.model,
-        "parameter_count": parameter_count,
         "checkpoint_epoch": int(checkpoint["epoch"]),
         "categories": categories,
         "chance_accuracy": 1.0 / len(categories),
