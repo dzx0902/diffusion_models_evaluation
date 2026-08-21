@@ -79,6 +79,19 @@ def backend_defaults(backend: str) -> tuple[str, int, int]:
     return "float16", 320, 576
 
 
+def frames_to_uint8(frames: list[Any]) -> np.ndarray:
+    """Normalize PIL, uint8, or Diffusers float frames for diagnostics."""
+    converted = []
+    for frame in frames:
+        pixels = np.asarray(frame)
+        if np.issubdtype(pixels.dtype, np.floating):
+            if pixels.size and float(pixels.max()) <= 1.5:
+                pixels = pixels * 255.0
+            pixels = np.rint(pixels)
+        converted.append(np.clip(pixels, 0, 255).astype(np.uint8))
+    return np.stack(converted)
+
+
 def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
@@ -131,7 +144,7 @@ def main() -> None:
             ).frames[0]
             elapsed = time.perf_counter() - started
             export_to_video(frames, str(output), fps=args.fps)
-            pixels = np.stack([np.asarray(frame, dtype=np.uint8) for frame in frames])
+            pixels = frames_to_uint8(frames)
             record: dict[str, Any] = {
                 "backend": args.backend,
                 "video_id": video_id,
