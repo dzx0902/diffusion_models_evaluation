@@ -207,6 +207,24 @@ The resulting `report.json` contains validation/test top-1 accuracy, macro
 accuracy, per-class recall, and the confusion matrix. Accuracy near chance
 means the EEG pipeline must be fixed before another text-space regression run.
 
+For the initial architecture screen, run all simple classifiers under the
+same subject-dependent 4-second protocol. MLP uses five-band log-power;
+EEGNet, ShallowNet, DeepNet, TSConv, Conformer, and multiscale use raw EEG.
+
+```bash
+python scripts/run_eeg_category_model_screen.py \
+  --trials data/manifests/chentianlin/eeg_trials.csv \
+  --split-plan outputs/eeg_wan_structured_v2/splits/chentianlin_video_6fold_plan.json \
+  --experiment video_6fold_1 \
+  --output-root outputs/eeg_clip_video/category_model_screen/chentianlin/video_6fold_1 \
+  --epochs 15 --min-epochs 5 --patience 4 \
+  --batch-size 32 --workers 0 --skip-existing
+```
+
+The runner resumes an interrupted model from `last.pt`, skips completed
+models, and writes the ranked `report.md` and `model_summary.csv` after all
+available runs.
+
 ZeroScope uses the same command with `--latent-dim 1024` and its own target and
 output paths. Start ZeroScope only after the AnimateDiff exact-target and EEG
 pilot pass.
