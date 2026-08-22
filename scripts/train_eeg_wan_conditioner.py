@@ -342,7 +342,7 @@ def main() -> None:
     train_lengths = [int(targets[row["video_id"]]["tokens"]) for row in train_rows]
     min_tokens = args.min_tokens if args.min_tokens is not None else min(train_lengths)
     max_tokens = args.max_tokens if args.max_tokens is not None else max(train_lengths)
-    if not 1 <= min_tokens <= max_tokens <= 128:
+    if not 1 <= min_tokens <= max_tokens <= args.slots:
         raise ValueError(f"Invalid token range [{min_tokens}, {max_tokens}]")
     all_lengths = [int(targets[video_id]["tokens"]) for video_id in selected_ids]
     if min(all_lengths) < min_tokens or max(all_lengths) > max_tokens:

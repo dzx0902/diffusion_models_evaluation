@@ -58,6 +58,11 @@ class EEGConditioner(nn.Module):
         super().__init__()
         if config.architecture not in {"baseline", "multiscale"}:
             raise ValueError(f"Unknown EEG architecture: {config.architecture}")
+        if not 1 <= config.min_tokens <= config.max_tokens <= config.slots:
+            raise ValueError(
+                f"Token range [{config.min_tokens}, {config.max_tokens}] "
+                f"must fit within {config.slots} condition slots"
+            )
         self.config = config
         self.stem = nn.Sequential(
             nn.Conv1d(config.channels, config.hidden_dim, kernel_size=51, padding=25, bias=False),

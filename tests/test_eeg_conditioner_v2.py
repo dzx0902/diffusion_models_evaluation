@@ -59,6 +59,26 @@ class EEGConditionerV2Test(unittest.TestCase):
         self.assertEqual(tuple(latent.shape), (2, 7, 8))
         self.assertEqual(tuple(logits.shape), (2, 1))
 
+    def test_fixed_cogvideox_token_range_is_supported(self) -> None:
+        config = EEGConditionerConfig(
+            hidden_dim=32,
+            slots=226,
+            latent_dim=16,
+            encoder_layers=1,
+            decoder_layers=1,
+            heads=8,
+            min_tokens=226,
+            max_tokens=226,
+        )
+
+        model = EEGConditioner(config)
+
+        self.assertEqual(model.length_head[-1].out_features, 1)
+
+    def test_token_range_cannot_exceed_condition_slots(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must fit within 128 condition slots"):
+            EEGConditioner(EEGConditionerConfig(slots=128, min_tokens=1, max_tokens=226))
+
     def test_multi_positive_contrastive_loss_is_finite(self) -> None:
         predicted = torch.randn(3, 7, 8)
         target = torch.randn(3, 7, 8)
