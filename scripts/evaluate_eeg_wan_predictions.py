@@ -78,6 +78,28 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def prompt_retrieval_metrics(
+    predicted: torch.Tensor,
+    candidate_targets: torch.Tensor,
+    true_index: int,
+) -> dict[str, float | int]:
+    """Measure whether a prediction is closer to its caption than other captions."""
+    similarities = F.cosine_similarity(predicted.unsqueeze(0), candidate_targets, dim=-1)
+    true_similarity = similarities[true_index]
+    rank = int((similarities > true_similarity).sum().item()) + 1
+    if similarities.numel() == 1:
+        margin = 0.0
+    else:
+        mask = torch.ones_like(similarities, dtype=torch.bool)
+        mask[true_index] = False
+        margin = float((true_similarity - similarities[mask].max()).item())
+    return {
+        "prompt_retrieval_rank": rank,
+        "prompt_retrieval_top1": int(rank == 1),
+        "prompt_retrieval_margin": margin,
+    }
+
+
 def main() -> None:
     args = parse_args()
     with args.trials.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -102,6 +124,19 @@ def main() -> None:
         condition_offset = condition_offset.float().cpu()
     target_cache: dict[str, dict[str, Any]] = {}
     trial_metrics: list[dict[str, Any]] = []
+    predicted_pooled: list[torch.Tensor] = []
+
+    prompt_targets: dict[str, torch.Tensor] = {}
+    for video_id in sorted({row["video_id"] for row in trials}):
+        target_row = targets[video_id]
+        prompt = str(target_row.get("prompt") or video_id)
+        if prompt in prompt_targets:
+            continue
+        payload = torch.load(target_row["latent_path"], map_location="cpu", weights_only=True)
+        prompt_targets[prompt] = payload["latent"].float()[: int(payload["tokens"])].mean(0)
+    prompt_names = sorted(prompt_targets)
+    prompt_indices = {prompt: index for index, prompt in enumerate(prompt_names)}
+    candidate_targets = torch.stack([prompt_targets[prompt] for prompt in prompt_names])
 
     for index, row in enumerate(trials, start=1):
         video_id = row["video_id"]
@@ -117,7 +152,8 @@ def main() -> None:
         predicted_tokens = int(logits.argmax(dim=-1).item() + config.min_tokens)
         confidence = float(logits.softmax(dim=-1).max().item())
         valid = min(target_tokens, predicted.shape[0])
-        cosine = float(F.cosine_similarity(predicted[:valid].mean(0), target_latent[:valid].mean(0), dim=0).item())
+        pooled_prediction = predicted[:valid].mean(0)
+        cosine = float(F.cosine_similarity(pooled_prediction, target_latent[:valid].mean(0), dim=0).item())
         mse = float((predicted[:valid] - target_latent[:valid]).square().mean().item())
         metrics = {
                 "video_id": video_id,
@@ -141,8 +177,19 @@ def main() -> None:
                 cosine - metrics["mean_baseline_pooled_cosine"]
             )
         trial_metrics.append(metrics)
+        predicted_pooled.append(pooled_prediction)
         if index % 25 == 0 or index == len(trials):
             print(f"[eeg-wan-rank] {index}/{len(trials)}", flush=True)
+
+    for metrics, pooled_prediction in zip(trial_metrics, predicted_pooled, strict=True):
+        prompt = str(targets[str(metrics["video_id"])].get("prompt") or metrics["video_id"])
+        metrics.update(
+            prompt_retrieval_metrics(
+                pooled_prediction,
+                candidate_targets,
+                prompt_indices[prompt],
+            )
+        )
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in trial_metrics:
@@ -159,9 +206,26 @@ def main() -> None:
                 "mean_length_error": float(np.mean([row["length_error"] for row in rows])),
                 "length_accuracy": float(np.mean([row["length_correct"] for row in rows])),
                 "mean_length_confidence": float(np.mean([row["length_confidence"] for row in rows])),
+                "mean_prompt_retrieval_rank": float(
+                    np.mean([row["prompt_retrieval_rank"] for row in rows])
+                ),
+                "prompt_retrieval_top1": float(
+                    np.mean([row["prompt_retrieval_top1"] for row in rows])
+                ),
+                "mean_prompt_retrieval_margin": float(
+                    np.mean([row["prompt_retrieval_margin"] for row in rows])
+                ),
             }
         )
-    video_metrics.sort(key=lambda row: (-row["mean_pooled_cosine"], row["mean_valid_latent_mse"], row["video_id"]))
+    video_metrics.sort(
+        key=lambda row: (
+            -row["prompt_retrieval_top1"],
+            -row["mean_prompt_retrieval_margin"],
+            -row["mean_pooled_cosine"],
+            row["mean_valid_latent_mse"],
+            row["video_id"],
+        )
+    )
     for rank, row in enumerate(video_metrics, start=1):
         row["rank"] = rank
 
@@ -176,7 +240,12 @@ def main() -> None:
         video_trials = grouped[str(video["video_id"])]
         best_trial = max(
             video_trials,
-            key=lambda row: (row["pooled_cosine"], -row["valid_latent_mse"]),
+            key=lambda row: (
+                row["prompt_retrieval_top1"],
+                row["prompt_retrieval_margin"],
+                row["pooled_cosine"],
+                -row["valid_latent_mse"],
+            ),
         )
         representatives[label] = {"video": video, "best_trial": best_trial}
 
@@ -197,6 +266,15 @@ def main() -> None:
         "mean_pooled_cosine": float(np.mean([row["pooled_cosine"] for row in trial_metrics])),
         "mean_valid_latent_mse": float(np.mean([row["valid_latent_mse"] for row in trial_metrics])),
         "mean_length_accuracy": float(np.mean([row["length_correct"] for row in trial_metrics])),
+        "mean_prompt_retrieval_rank": float(
+            np.mean([row["prompt_retrieval_rank"] for row in trial_metrics])
+        ),
+        "prompt_retrieval_top1": float(
+            np.mean([row["prompt_retrieval_top1"] for row in trial_metrics])
+        ),
+        "mean_prompt_retrieval_margin": float(
+            np.mean([row["prompt_retrieval_margin"] for row in trial_metrics])
+        ),
         "top_videos": video_metrics[:10],
         "representatives": representatives,
     }
