@@ -12,7 +12,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from evaluate_eeg_wan_predictions import prompt_retrieval_metrics
+from evaluate_eeg_wan_predictions import prompt_retrieval_metrics, residual_metrics
 
 
 class EEGPredictionRankingTest(unittest.TestCase):
@@ -33,6 +33,17 @@ class EEGPredictionRankingTest(unittest.TestCase):
         self.assertEqual(metrics["prompt_retrieval_rank"], 2)
         self.assertEqual(metrics["prompt_retrieval_top1"], 0)
         self.assertLess(metrics["prompt_retrieval_margin"], 0.0)
+
+    def test_residual_metrics_remove_common_center(self) -> None:
+        center = torch.tensor([[10.0, 10.0], [10.0, 10.0]])
+        target = center + torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+        predicted = center + torch.tensor([[0.5, 0.0], [0.5, 0.0]])
+
+        metrics = residual_metrics(predicted, target, center)
+
+        self.assertAlmostEqual(metrics["residual_pooled_cosine"], 1.0)
+        self.assertAlmostEqual(metrics["residual_energy_ratio"], 0.25)
+        self.assertAlmostEqual(metrics["residual_mse_fraction"], 0.25)
 
 
 if __name__ == "__main__":

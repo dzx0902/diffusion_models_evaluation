@@ -54,11 +54,16 @@ def read_targets(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def selected_ids(args: argparse.Namespace) -> set[str]:
+    experiment = load_experiment(args)
+    return set(experiment[f"{args.partition}_video_ids"])
+
+
+def load_experiment(args: argparse.Namespace) -> dict[str, Any]:
     plan = json.loads(args.split_plan.read_text(encoding="utf-8"))
     experiment = next((item for item in plan["experiments"] if item["name"] == args.experiment), None)
     if experiment is None:
         raise KeyError(f"Unknown experiment {args.experiment!r}")
-    return set(experiment[f"{args.partition}_video_ids"])
+    return experiment
 
 
 def load_trial(row: dict[str, str]) -> torch.Tensor:
@@ -100,6 +105,56 @@ def prompt_retrieval_metrics(
     }
 
 
+def compute_target_center(
+    targets: dict[str, dict[str, Any]],
+    video_ids: set[str],
+) -> torch.Tensor:
+    """Compute a slot-wise center from training targets without test leakage."""
+    total: torch.Tensor | None = None
+    count = 0
+    for video_id in sorted(video_ids):
+        if video_id not in targets:
+            raise KeyError(f"Training target missing video ID: {video_id}")
+        payload = torch.load(targets[video_id]["latent_path"], map_location="cpu", weights_only=True)
+        latent = payload["latent"].float()
+        if total is None:
+            total = torch.zeros_like(latent)
+        elif latent.shape != total.shape:
+            raise ValueError(
+                f"Target shape mismatch for {video_id}: {tuple(latent.shape)} != {tuple(total.shape)}"
+            )
+        total += latent
+        count += 1
+    if total is None or count == 0:
+        raise ValueError("Cannot compute target center from an empty training partition")
+    return total / count
+
+
+def residual_metrics(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    center: torch.Tensor,
+) -> dict[str, float]:
+    predicted_residual = predicted - center
+    target_residual = target - center
+    target_energy = float(target_residual.square().mean().item())
+    predicted_energy = float(predicted_residual.square().mean().item())
+    mse = float((predicted_residual - target_residual).square().mean().item())
+    cosine = float(
+        F.cosine_similarity(
+            predicted_residual.mean(0),
+            target_residual.mean(0),
+            dim=0,
+        ).item()
+    )
+    return {
+        "residual_mse": mse,
+        "residual_mse_fraction": mse / max(target_energy, 1e-12),
+        "residual_pooled_cosine": cosine,
+        "residual_energy_ratio": predicted_energy / max(target_energy, 1e-12),
+    }
+
+
 def main() -> None:
     args = parse_args()
     with args.trials.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -113,6 +168,10 @@ def main() -> None:
     missing = {row["video_id"] for row in trials} - set(targets)
     if missing:
         raise KeyError(f"Targets missing video IDs: {sorted(missing)[:5]}")
+    experiment = load_experiment(args)
+    duration_video_ids = {row["video_id"] for row in duration_trials}
+    center_video_ids = set(experiment["train_video_ids"]) & duration_video_ids
+    target_center = compute_target_center(targets, center_video_ids)
 
     device = torch.device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
@@ -125,18 +184,28 @@ def main() -> None:
     target_cache: dict[str, dict[str, Any]] = {}
     trial_metrics: list[dict[str, Any]] = []
     predicted_pooled: list[torch.Tensor] = []
+    predicted_residual_pooled: list[torch.Tensor] = []
 
     prompt_targets: dict[str, torch.Tensor] = {}
+    prompt_residual_targets: dict[str, torch.Tensor] = {}
+    prompt_video_ids: dict[str, str] = {}
     for video_id in sorted({row["video_id"] for row in trials}):
         target_row = targets[video_id]
         prompt = str(target_row.get("prompt") or video_id)
         if prompt in prompt_targets:
             continue
         payload = torch.load(target_row["latent_path"], map_location="cpu", weights_only=True)
-        prompt_targets[prompt] = payload["latent"].float()[: int(payload["tokens"])].mean(0)
+        tokens = int(payload["tokens"])
+        latent = payload["latent"].float()[:tokens]
+        prompt_targets[prompt] = latent.mean(0)
+        prompt_residual_targets[prompt] = (latent - target_center[:tokens]).mean(0)
+        prompt_video_ids[prompt] = video_id
     prompt_names = sorted(prompt_targets)
     prompt_indices = {prompt: index for index, prompt in enumerate(prompt_names)}
     candidate_targets = torch.stack([prompt_targets[prompt] for prompt in prompt_names])
+    candidate_residual_targets = torch.stack(
+        [prompt_residual_targets[prompt] for prompt in prompt_names]
+    )
 
     for index, row in enumerate(trials, start=1):
         video_id = row["video_id"]
@@ -153,6 +222,8 @@ def main() -> None:
         confidence = float(logits.softmax(dim=-1).max().item())
         valid = min(target_tokens, predicted.shape[0])
         pooled_prediction = predicted[:valid].mean(0)
+        residual_prediction = predicted[:valid] - target_center[:valid]
+        pooled_residual_prediction = residual_prediction.mean(0)
         cosine = float(F.cosine_similarity(pooled_prediction, target_latent[:valid].mean(0), dim=0).item())
         mse = float((predicted[:valid] - target_latent[:valid]).square().mean().item())
         metrics = {
@@ -167,6 +238,13 @@ def main() -> None:
                 "valid_latent_mse": mse,
                 "pooled_cosine": cosine,
             }
+        metrics.update(
+            residual_metrics(
+                predicted[:valid],
+                target_latent[:valid],
+                target_center[:valid],
+            )
+        )
         if condition_offset is not None:
             metrics["mean_baseline_mse"] = float(F.mse_loss(condition_offset, target_latent).item())
             metrics["mean_baseline_pooled_cosine"] = float(
@@ -178,10 +256,16 @@ def main() -> None:
             )
         trial_metrics.append(metrics)
         predicted_pooled.append(pooled_prediction)
+        predicted_residual_pooled.append(pooled_residual_prediction)
         if index % 25 == 0 or index == len(trials):
             print(f"[eeg-wan-rank] {index}/{len(trials)}", flush=True)
 
-    for metrics, pooled_prediction in zip(trial_metrics, predicted_pooled, strict=True):
+    for metrics, pooled_prediction, pooled_residual_prediction in zip(
+        trial_metrics,
+        predicted_pooled,
+        predicted_residual_pooled,
+        strict=True,
+    ):
         prompt = str(targets[str(metrics["video_id"])].get("prompt") or metrics["video_id"])
         metrics.update(
             prompt_retrieval_metrics(
@@ -190,6 +274,22 @@ def main() -> None:
                 prompt_indices[prompt],
             )
         )
+        residual_retrieval = prompt_retrieval_metrics(
+            pooled_residual_prediction,
+            candidate_residual_targets,
+            prompt_indices[prompt],
+        )
+        metrics.update({f"residual_{key}": value for key, value in residual_retrieval.items()})
+        similarities = F.cosine_similarity(
+            pooled_residual_prediction.unsqueeze(0),
+            candidate_residual_targets,
+            dim=-1,
+        )
+        nearest_index = int(similarities.argmax().item())
+        nearest_prompt = prompt_names[nearest_index]
+        metrics["residual_nearest_video_id"] = prompt_video_ids[nearest_prompt]
+        metrics["residual_nearest_prompt"] = nearest_prompt
+        metrics["residual_nearest_cosine"] = float(similarities[nearest_index].item())
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in trial_metrics:
@@ -215,14 +315,32 @@ def main() -> None:
                 "mean_prompt_retrieval_margin": float(
                     np.mean([row["prompt_retrieval_margin"] for row in rows])
                 ),
+                "mean_residual_pooled_cosine": float(
+                    np.mean([row["residual_pooled_cosine"] for row in rows])
+                ),
+                "mean_residual_mse_fraction": float(
+                    np.mean([row["residual_mse_fraction"] for row in rows])
+                ),
+                "mean_residual_energy_ratio": float(
+                    np.mean([row["residual_energy_ratio"] for row in rows])
+                ),
+                "mean_residual_prompt_retrieval_rank": float(
+                    np.mean([row["residual_prompt_retrieval_rank"] for row in rows])
+                ),
+                "residual_prompt_retrieval_top1": float(
+                    np.mean([row["residual_prompt_retrieval_top1"] for row in rows])
+                ),
+                "mean_residual_prompt_retrieval_margin": float(
+                    np.mean([row["residual_prompt_retrieval_margin"] for row in rows])
+                ),
             }
         )
     video_metrics.sort(
         key=lambda row: (
-            -row["prompt_retrieval_top1"],
-            -row["mean_prompt_retrieval_margin"],
-            -row["mean_pooled_cosine"],
-            row["mean_valid_latent_mse"],
+            -row["residual_prompt_retrieval_top1"],
+            -row["mean_residual_prompt_retrieval_margin"],
+            -row["mean_residual_pooled_cosine"],
+            row["mean_residual_mse_fraction"],
             row["video_id"],
         )
     )
@@ -241,10 +359,10 @@ def main() -> None:
         best_trial = max(
             video_trials,
             key=lambda row: (
-                row["prompt_retrieval_top1"],
-                row["prompt_retrieval_margin"],
-                row["pooled_cosine"],
-                -row["valid_latent_mse"],
+                row["residual_prompt_retrieval_top1"],
+                row["residual_prompt_retrieval_margin"],
+                row["residual_pooled_cosine"],
+                -row["residual_mse_fraction"],
             ),
         )
         representatives[label] = {"video": video, "best_trial": best_trial}
@@ -274,6 +392,26 @@ def main() -> None:
         ),
         "mean_prompt_retrieval_margin": float(
             np.mean([row["prompt_retrieval_margin"] for row in trial_metrics])
+        ),
+        "target_center_source": "train_partition",
+        "target_center_video_count": len(center_video_ids),
+        "mean_residual_pooled_cosine": float(
+            np.mean([row["residual_pooled_cosine"] for row in trial_metrics])
+        ),
+        "mean_residual_mse_fraction": float(
+            np.mean([row["residual_mse_fraction"] for row in trial_metrics])
+        ),
+        "mean_residual_energy_ratio": float(
+            np.mean([row["residual_energy_ratio"] for row in trial_metrics])
+        ),
+        "mean_residual_prompt_retrieval_rank": float(
+            np.mean([row["residual_prompt_retrieval_rank"] for row in trial_metrics])
+        ),
+        "residual_prompt_retrieval_top1": float(
+            np.mean([row["residual_prompt_retrieval_top1"] for row in trial_metrics])
+        ),
+        "mean_residual_prompt_retrieval_margin": float(
+            np.mean([row["residual_prompt_retrieval_margin"] for row in trial_metrics])
         ),
         "top_videos": video_metrics[:10],
         "representatives": representatives,
