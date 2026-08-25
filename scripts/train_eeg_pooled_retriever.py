@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mse-weight", type=float, default=0.1)
     parser.add_argument("--cosine-weight", type=float, default=1.0)
     parser.add_argument("--contrastive-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--contrastive-bank",
+        choices=("batch", "train"),
+        default="batch",
+        help="Use batch negatives or all unique prompt targets in the active split.",
+    )
     parser.add_argument("--variance-weight", type=float, default=0.05)
     parser.add_argument("--covariance-weight", type=float, default=0.005)
     parser.add_argument("--seed", type=int, default=42)
@@ -291,6 +297,39 @@ def loss_kwargs(args: argparse.Namespace) -> dict[str, float]:
     }
 
 
+def standardized_bank(
+    bank: dict[str, dict[str, Any]],
+    mean: torch.Tensor,
+    scale: torch.Tensor,
+    device: torch.device,
+) -> tuple[list[str], torch.Tensor, dict[str, int]]:
+    prompts = sorted(bank)
+    candidates = torch.stack(
+        [(bank[prompt]["vector"] - mean) / scale for prompt in prompts]
+    ).to(device)
+    return prompts, candidates, {prompt: index for index, prompt in enumerate(prompts)}
+
+
+def full_bank_loss_kwargs(
+    batch_prompts: list[str],
+    candidates: torch.Tensor,
+    prompt_indices: dict[str, int],
+    device: torch.device,
+    enabled: bool,
+) -> dict[str, Any]:
+    if not enabled:
+        return {}
+    return {
+        "contrastive_candidates": candidates,
+        "contrastive_true_indices": torch.tensor(
+            [prompt_indices[prompt] for prompt in batch_prompts],
+            dtype=torch.long,
+            device=device,
+        ),
+        "variance_target_std": candidates.std(dim=0, unbiased=False),
+    }
+
+
 def evaluate(
     model: EEGPooledRetriever,
     loader: DataLoader,
@@ -299,13 +338,12 @@ def evaluate(
     scale: torch.Tensor,
     device: torch.device,
     weights: dict[str, float],
+    contrastive_bank: str,
 ) -> tuple[dict[str, float], list[dict[str, Any]]]:
     model.eval()
-    prompts = sorted(candidate_bank)
-    prompt_indices = {prompt: index for index, prompt in enumerate(prompts)}
-    candidates = torch.stack(
-        [(candidate_bank[prompt]["vector"] - mean) / scale for prompt in prompts]
-    ).to(device)
+    prompts, candidates, prompt_indices = standardized_bank(
+        candidate_bank, mean, scale, device
+    )
     predictions = []
     targets = []
     metadata: list[dict[str, Any]] = []
@@ -320,6 +358,13 @@ def evaluate(
                 target,
                 positive_mask(batch["prompt"], device),
                 **weights,
+                **full_bank_loss_kwargs(
+                    batch["prompt"],
+                    candidates,
+                    prompt_indices,
+                    device,
+                    contrastive_bank == "train",
+                ),
             )
             losses.append({**values, "count": len(batch["prompt"])})
             predictions.append(predicted.cpu())
@@ -471,6 +516,7 @@ def main() -> None:
         "train_prompts": len(train_bank),
         "validation_prompts": len(valid_bank),
         "group_sessions": args.group_sessions,
+        "contrastive_bank": args.contrastive_bank,
     }
     print(f"[eeg-pooled] protocol={json.dumps(protocol)}", flush=True)
 
@@ -479,11 +525,26 @@ def main() -> None:
         checkpoint_config = EEGPooledRetrieverConfig(**checkpoint["config"])
         model = EEGPooledRetriever(checkpoint_config).to(device)
         model.load_state_dict(checkpoint["state_dict"])
+        checkpoint_bank = checkpoint.get("protocol", {}).get("contrastive_bank", "batch")
+        if checkpoint_bank != args.contrastive_bank:
+            raise ValueError(
+                "Checkpoint contrastive bank differs: "
+                f"checkpoint={checkpoint_bank!r}, requested={args.contrastive_bank!r}"
+            )
         if not torch.allclose(checkpoint["target_mean"].cpu(), mean, atol=1e-6, rtol=1e-6):
             raise ValueError("Checkpoint target mean differs from this training split")
         if not torch.allclose(checkpoint["target_scale"].cpu(), scale, atol=1e-6, rtol=1e-6):
             raise ValueError("Checkpoint target scale differs from this training split")
-        metrics, rows = evaluate(model, valid_loader, valid_bank, mean, scale, device, weights)
+        metrics, rows = evaluate(
+            model,
+            valid_loader,
+            valid_bank,
+            mean,
+            scale,
+            device,
+            weights,
+            args.contrastive_bank,
+        )
         result = {
             "checkpoint": str(args.checkpoint),
             "checkpoint_epoch": int(checkpoint["epoch"]),
@@ -534,6 +595,9 @@ def main() -> None:
 
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
+        _, train_candidates, train_prompt_indices = standardized_bank(
+            train_bank, mean, scale, device
+        )
         for batch in train_loader:
             optimizer.zero_grad(set_to_none=True)
             predicted = model(batch["eeg"].to(device))
@@ -542,12 +606,28 @@ def main() -> None:
                 batch["target"].to(device),
                 positive_mask(batch["prompt"], device),
                 **weights,
+                **full_bank_loss_kwargs(
+                    batch["prompt"],
+                    train_candidates,
+                    train_prompt_indices,
+                    device,
+                    args.contrastive_bank == "train",
+                ),
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
         scheduler.step()
-        valid, _ = evaluate(model, valid_loader, valid_bank, mean, scale, device, weights)
+        valid, _ = evaluate(
+            model,
+            valid_loader,
+            valid_bank,
+            mean,
+            scale,
+            device,
+            weights,
+            args.contrastive_bank,
+        )
         record = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"], "valid": valid}
         with history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")

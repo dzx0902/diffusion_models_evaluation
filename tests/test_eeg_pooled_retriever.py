@@ -17,6 +17,7 @@ if str(SCRIPTS) not in sys.path:
 from ms_video_eval.eeg_pooled_retriever import (
     EEGPooledRetriever,
     EEGPooledRetrieverConfig,
+    full_bank_contrastive_loss,
     pooled_retrieval_loss,
     positive_mask,
     retrieval_ranks,
@@ -53,6 +54,45 @@ def test_multi_positive_loss_is_finite() -> None:
         predicted,
         target,
         positive_mask(labels, predicted.device),
+    )
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert torch.isfinite(predicted.grad).all()
+    assert metrics["contrastive_loss"] >= 0
+
+
+def test_full_bank_loss_prefers_correct_candidates() -> None:
+    candidates = torch.eye(4)
+    true_indices = torch.tensor([2, 0])
+    correct = torch.stack([candidates[2], candidates[0]]).requires_grad_()
+    wrong = torch.stack([candidates[1], candidates[3]])
+
+    correct_loss = full_bank_contrastive_loss(
+        correct, candidates, true_indices, temperature=0.1
+    )
+    wrong_loss = full_bank_contrastive_loss(
+        wrong, candidates, true_indices, temperature=0.1
+    )
+    correct_loss.backward()
+
+    assert correct_loss < wrong_loss
+    assert torch.isfinite(correct.grad).all()
+
+
+def test_pooled_loss_accepts_full_bank() -> None:
+    candidates = torch.eye(4)
+    predicted = torch.randn(3, 4, requires_grad=True)
+    target = candidates[torch.tensor([0, 1, 2])]
+    indices = torch.tensor([0, 1, 2])
+
+    loss, metrics = pooled_retrieval_loss(
+        predicted,
+        target,
+        torch.eye(3, dtype=torch.bool),
+        contrastive_candidates=candidates,
+        contrastive_true_indices=indices,
+        variance_target_std=candidates.std(dim=0, unbiased=False),
     )
     loss.backward()
 

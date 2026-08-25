@@ -160,11 +160,43 @@ def multi_positive_contrastive_loss(
     return 0.5 * (forward + reverse)
 
 
-def variance_loss(predicted: torch.Tensor, target_std: float = 1.0) -> torch.Tensor:
+def full_bank_contrastive_loss(
+    predicted: torch.Tensor,
+    candidates: torch.Tensor,
+    true_indices: torch.Tensor,
+    temperature: float,
+) -> torch.Tensor:
+    """Classify each prediction against every unique prompt in a caption bank."""
+    if candidates.ndim != 2 or candidates.shape[1] != predicted.shape[1]:
+        raise ValueError(
+            "Candidate bank must have shape [prompts, target_dim], got "
+            f"{tuple(candidates.shape)} for predictions {tuple(predicted.shape)}"
+        )
+    if true_indices.shape != (predicted.shape[0],):
+        raise ValueError(
+            f"Expected {predicted.shape[0]} true indices, got {tuple(true_indices.shape)}"
+        )
+    logits = (
+        F.normalize(predicted, dim=-1)
+        @ F.normalize(candidates, dim=-1).t()
+        / temperature
+    )
+    return F.cross_entropy(logits, true_indices.to(logits.device, dtype=torch.long))
+
+
+def variance_loss(
+    predicted: torch.Tensor,
+    target_std: torch.Tensor | float = 1.0,
+) -> torch.Tensor:
     if predicted.shape[0] < 2:
         return predicted.new_zeros(())
     standard_deviation = torch.sqrt(predicted.var(dim=0, unbiased=False) + 1e-4)
-    return F.relu(target_std - standard_deviation).mean()
+    expected = torch.as_tensor(
+        target_std,
+        device=predicted.device,
+        dtype=predicted.dtype,
+    )
+    return F.relu(expected - standard_deviation).mean()
 
 
 def covariance_loss(predicted: torch.Tensor) -> torch.Tensor:
@@ -188,16 +220,29 @@ def pooled_retrieval_loss(
     contrastive_weight: float = 1.0,
     variance_weight: float = 0.05,
     covariance_weight: float = 0.005,
+    contrastive_candidates: torch.Tensor | None = None,
+    contrastive_true_indices: torch.Tensor | None = None,
+    variance_target_std: torch.Tensor | float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     mse = F.mse_loss(predicted, target)
     cosine = 1 - F.cosine_similarity(predicted, target, dim=-1).mean()
-    contrastive = multi_positive_contrastive_loss(
-        predicted,
-        target,
-        positives,
-        temperature,
-    )
-    variance = variance_loss(predicted)
+    if contrastive_candidates is None:
+        contrastive = multi_positive_contrastive_loss(
+            predicted,
+            target,
+            positives,
+            temperature,
+        )
+    else:
+        if contrastive_true_indices is None:
+            raise ValueError("Full-bank contrastive loss requires true prompt indices")
+        contrastive = full_bank_contrastive_loss(
+            predicted,
+            contrastive_candidates,
+            contrastive_true_indices,
+            temperature,
+        )
+    variance = variance_loss(predicted, variance_target_std)
     covariance = covariance_loss(predicted)
     loss = (
         mse_weight * mse
