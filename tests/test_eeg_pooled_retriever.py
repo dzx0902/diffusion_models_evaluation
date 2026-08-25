@@ -18,6 +18,7 @@ from ms_video_eval.eeg_pooled_retriever import (
     EEGPooledRetriever,
     EEGPooledRetrieverConfig,
     full_bank_contrastive_loss,
+    grouped_retrieval_metrics,
     pooled_retrieval_loss,
     positive_mask,
     retrieval_ranks,
@@ -119,6 +120,28 @@ def test_retrieval_ranks_penalize_ties() -> None:
     ranks, _ = retrieval_ranks(predicted, candidates, torch.tensor([0]))
 
     torch.testing.assert_close(ranks, torch.tensor([2.0]))
+
+
+def test_grouped_retrieval_averages_repeated_observations() -> None:
+    candidates = torch.eye(3)
+    predicted = torch.tensor(
+        [
+            [0.6, 0.8, 0.0],
+            [0.6, -0.8, 0.0],
+            [0.0, 0.6, 0.8],
+            [0.0, 0.6, -0.8],
+        ]
+    )
+    metrics = grouped_retrieval_metrics(
+        predicted,
+        candidates,
+        torch.tensor([0, 0, 1, 1]),
+        ["video-a", "video-a", "video-b", "video-b"],
+    )
+
+    assert metrics["count"] == 2
+    assert metrics["recall_at_1"] == 1.0
+    assert metrics["mean_rank"] == 1.0
 
 
 def test_retrieval_suite_selects_best_unique_video() -> None:

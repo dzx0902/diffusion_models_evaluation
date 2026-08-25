@@ -27,6 +27,7 @@ if str(SRC) not in sys.path:
 from ms_video_eval.eeg_pooled_retriever import (
     EEGPooledRetriever,
     EEGPooledRetrieverConfig,
+    grouped_retrieval_metrics,
     pooled_retrieval_loss,
     positive_mask,
     retrieval_ranks,
@@ -419,6 +420,15 @@ def evaluate(
             "chance_recall_at_1": 1.0 / len(prompts),
             "chance_recall_at_5": min(5.0 / len(prompts), 1.0),
         }
+    )
+    grouped = grouped_retrieval_metrics(
+        predicted,
+        candidates,
+        true_indices,
+        [row["video_id"] for row in metadata],
+    )
+    metrics.update(
+        {f"session_averaged_{key}": value for key, value in grouped.items()}
     )
     trial_rows = []
     for index, row in enumerate(metadata):

@@ -272,3 +272,40 @@ def retrieval_ranks(
     ties = torch.isclose(similarities, true_similarities, atol=1e-7, rtol=1e-6).sum(dim=1)
     ranks = 1.0 + greater + 0.5 * (ties.float() - 1.0)
     return ranks, similarities
+
+
+def grouped_retrieval_metrics(
+    predicted: torch.Tensor,
+    candidates: torch.Tensor,
+    true_indices: torch.Tensor,
+    group_ids: list[str],
+) -> dict[str, float]:
+    """Average repeated observations before evaluating prompt retrieval."""
+    if len(group_ids) != predicted.shape[0]:
+        raise ValueError("group_ids must match the prediction batch")
+    groups: dict[str, list[int]] = {}
+    for index, group_id in enumerate(group_ids):
+        groups.setdefault(group_id, []).append(index)
+    grouped_predictions = []
+    grouped_indices = []
+    for indices in groups.values():
+        labels = true_indices[indices]
+        if not torch.equal(labels, labels[:1].expand_as(labels)):
+            raise ValueError("All observations in a group must share one target")
+        grouped_predictions.append(predicted[indices].mean(dim=0))
+        grouped_indices.append(labels[0])
+    averaged = torch.stack(grouped_predictions)
+    labels = torch.stack(grouped_indices)
+    ranks, _ = retrieval_ranks(averaged, candidates, labels)
+    exact = candidates[labels]
+    cosine = F.cosine_similarity(averaged, exact, dim=-1)
+    energy = averaged.square().mean(dim=-1) / exact.square().mean(dim=-1).clamp_min(1e-12)
+    return {
+        "count": len(groups),
+        "recall_at_1": float((ranks <= 1).float().mean().item()),
+        "recall_at_5": float((ranks <= 5).float().mean().item()),
+        "mrr": float((1.0 / ranks).mean().item()),
+        "mean_rank": float(ranks.mean().item()),
+        "mean_cosine": float(cosine.mean().item()),
+        "mean_energy_ratio": float(energy.mean().item()),
+    }

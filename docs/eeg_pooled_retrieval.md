@@ -65,7 +65,10 @@ python scripts/train_eeg_pooled_retriever.py \
 
 The test output contains `evaluation.json` and per-trial retrieval results in
 `trial_metrics.csv`. Compare Recall@1 and Recall@5 with the chance values in
-the same report. Do not generate videos if retrieval remains at chance.
+the same report. The `session_averaged_*` fields first average predictions for
+the same video across available sessions, then run retrieval. This diagnoses
+whether repeated EEG observations improve semantic signal. Do not generate
+videos if retrieval remains at chance.
 
 `--contrastive-bank train` compares every EEG prediction with every unique
 caption condition in the active split. During training this is the training
