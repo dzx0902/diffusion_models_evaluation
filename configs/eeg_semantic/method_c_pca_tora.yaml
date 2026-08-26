@@ -1,0 +1,51 @@
+experiment:
+  name: method_c_pca512_tora_chentianlin_fold1_seed42
+  method: tora_pca
+  seed: 42
+  output_dir: outputs/eeg_semantic/method_c_pca512_tora/chentianlin/fold1/seed42
+
+data:
+  trials: data/manifests/eeg_trials.csv
+  semantic_labels: outputs/semantic_labels/eeg_semantic_labels_v1.jsonl
+  split_plan: outputs/eeg_wan/splits/chentianlin_video_6fold_plan.json
+  fold: video_6fold_1
+  tora_target_index: outputs/tora/pca/fold1/dim512/index.jsonl
+  pca_projector: outputs/tora/pca/fold1/tora_text_pca_2048.npz
+  sessions: [session1, session2, session3]
+
+model:
+  channels: 62
+  sample_points: 800
+  sampling_rate: 200
+  hidden_dim: 256
+  token_count: 75
+  encoder_layers: 2
+  decoder_layers: 2
+  heads: 8
+  dropout: 0.15
+  architecture: baseline
+  condition_slots: 226
+  condition_dim: 512
+  target_centering: true
+
+loss:
+  mse: 1.0
+  cosine: 0.2
+  contrastive: 0.2
+  auxiliary_classification: 0.1
+  session_consistency: 0.1
+  prototype: 0.0
+
+contrastive:
+  temperature: 0.07
+  mode: hard_multi_positive
+
+training:
+  epochs: 80
+  batch_size: 24
+  workers: 0
+  group_sessions: true
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  amp: true
