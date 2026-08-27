@@ -10,7 +10,7 @@ data:
   split_plan: outputs/eeg_wan/splits/chentianlin_video_6fold_plan.json
   fold: video_6fold_1
   tora_target_index: outputs/tora/pca/fold1/dim512/index.jsonl
-  pca_projector: outputs/tora/pca/fold1/tora_text_pca_2048.npz
+  pca_projector: outputs/tora/pca/fold1/tora_text_pca_1024.npz
   sessions: [session1, session2, session3]
 
 model:

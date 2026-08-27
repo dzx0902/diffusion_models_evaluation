@@ -187,8 +187,8 @@ python scripts/fit_tora_text_pca.py \
   --index outputs/tora/text_cache/index.jsonl \
   --split-plan outputs/eeg_wan/splits/chentianlin_video_6fold_plan.json \
   --fold video_6fold_1 \
-  --output outputs/tora/pca/fold1/tora_text_pca_2048.npz \
-  --max-dim 2048 --batch-vectors 4096 --overwrite
+  --output outputs/tora/pca/fold1/tora_text_pca_1024.npz \
+  --max-dim 1024 --batch-vectors 2048 --overwrite
 ```
 
 held-out test round-trip：
@@ -196,10 +196,10 @@ held-out test round-trip：
 ```bash
 python scripts/evaluate_tora_pca_holdout.py \
   --index outputs/tora/text_cache/index.jsonl \
-  --projector outputs/tora/pca/fold1/tora_text_pca_2048.npz \
+  --projector outputs/tora/pca/fold1/tora_text_pca_1024.npz \
   --split-plan outputs/eeg_wan/splits/chentianlin_video_6fold_plan.json \
   --fold video_6fold_1 --partition test \
-  --dims 128 256 512 1024 2048 \
+  --dims 128 256 512 1024 \
   --output-dir outputs/tora/pca/fold1/holdout_test
 ```
 
@@ -211,7 +211,7 @@ variance 或 MSE 选择。
 ```bash
 python scripts/export_tora_pca_targets.py \
   --index outputs/tora/text_cache/index.jsonl \
-  --projector outputs/tora/pca/fold1/tora_text_pca_2048.npz \
+  --projector outputs/tora/pca/fold1/tora_text_pca_1024.npz \
   --dim 512 \
   --output-dir outputs/tora/pca/fold1/dim512 --overwrite
 ```
@@ -223,7 +223,7 @@ python scripts/export_tora_pca_targets.py \
 ```bash
 python scripts/export_tora_pca_roundtrip.py \
   --index outputs/tora/text_cache/index.jsonl \
-  --projector outputs/tora/pca/fold1/tora_text_pca_2048.npz \
+  --projector outputs/tora/pca/fold1/tora_text_pca_1024.npz \
   --dim 512 --video-ids 01-001 02-040 07-031 \
   --output-dir outputs/tora/controls/pca512_conditions
 ```
