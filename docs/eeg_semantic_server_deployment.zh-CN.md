@@ -45,6 +45,9 @@ $TORA_ROOT/sat/ckpts/t5-v1_1-xxl/
 $TORA_ROOT/sat/ckpts/tora/t2v/
 ```
 
+若服务器安装的是官方 Diffusers 版，则使用同一模型根目录下的
+`text_encoder/` 和 `tokenizer/`；SAT 与 Diffusers 生成 adapter 不可混用。
+
 设置路径：
 
 ```bash
@@ -146,6 +149,19 @@ export TORA_ROOT=/path/to/Tora
 python scripts/cache_tora_text_states.py \
   --captions outputs/semantic_labels/eeg_semantic_labels_v1.jsonl \
   --t5-model "$TORA_ROOT/sat/ckpts/t5-v1_1-xxl" \
+  --output-dir outputs/tora/text_cache \
+  --device cuda --batch-size 1 \
+  --model-dtype bfloat16 --save-dtype float32 --overwrite
+```
+
+Diffusers 权重目录例如 `.ms_video_models/Tora_T2V_diffusers`，缓存命令为：
+
+```bash
+export TORA_MODEL="$PROJECT_ROOT/.ms_video_models/Tora_T2V_diffusers"
+python scripts/cache_tora_text_states.py \
+  --captions outputs/semantic_labels/eeg_semantic_labels_v1.jsonl \
+  --t5-model "$TORA_MODEL/text_encoder" \
+  --tokenizer "$TORA_MODEL/tokenizer" \
   --output-dir outputs/tora/text_cache \
   --device cuda --batch-size 1 \
   --model-dtype bfloat16 --save-dtype float32 --overwrite

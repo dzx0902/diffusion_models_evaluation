@@ -31,6 +31,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--t5-model", type=Path, default=None)
     parser.add_argument(
+        "--tokenizer",
+        type=Path,
+        default=None,
+        help="Tokenizer directory; required when Diffusers stores tokenizer and text_encoder separately.",
+    )
+    parser.add_argument(
         "--output-dir", type=Path, default=ROOT / "outputs" / "tora" / "text_cache"
     )
     parser.add_argument("--device", default="cuda")
@@ -53,6 +59,15 @@ def resolve_t5_model(value: Path | None) -> Path:
     if not tora_root:
         raise ValueError("Pass --t5-model or set TORA_ROOT to the official Tora repository")
     return (Path(tora_root) / "sat" / "ckpts" / "t5-v1_1-xxl").resolve()
+
+
+def resolve_tokenizer(value: Path | None, model_path: Path) -> Path:
+    if value is not None:
+        return value.resolve()
+    sibling = model_path.parent / "tokenizer"
+    if model_path.name == "text_encoder" and sibling.is_dir():
+        return sibling.resolve()
+    return model_path
 
 
 def load_captions(path: Path) -> list[dict[str, str]]:
@@ -86,6 +101,9 @@ def main() -> None:
     model_path = resolve_t5_model(args.t5_model)
     if not model_path.is_dir():
         raise FileNotFoundError(model_path)
+    tokenizer_path = resolve_tokenizer(args.tokenizer, model_path)
+    if not tokenizer_path.is_dir():
+        raise FileNotFoundError(tokenizer_path)
     rows = load_captions(args.captions)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     index_path = args.output_dir / "index.jsonl"
@@ -93,7 +111,7 @@ def main() -> None:
     if (index_path.exists() or metadata_path.exists()) and not args.overwrite:
         raise FileExistsError("Tora cache exists; pass --overwrite or choose a new output directory")
     device = torch.device(args.device)
-    tokenizer = T5Tokenizer.from_pretrained(model_path)
+    tokenizer = T5Tokenizer.from_pretrained(tokenizer_path)
     model_dtype = getattr(torch, args.model_dtype)
     model = T5EncoderModel.from_pretrained(
         model_path,
@@ -150,6 +168,7 @@ def main() -> None:
         "schema_version": 1,
         "source": str(args.captions.resolve()),
         "t5_model": str(model_path),
+        "tokenizer": str(tokenizer_path),
         "max_length": TORA_TEXT_TOKENS,
         "hidden_dim": int(index_rows[0]["shape"][1]),
         "model_dtype": args.model_dtype,
