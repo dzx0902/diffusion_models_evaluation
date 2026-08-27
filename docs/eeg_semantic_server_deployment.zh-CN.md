@@ -57,7 +57,7 @@ cd "$PROJECT_ROOT"
 
 ```text
 data/manifests/chentianlin/eeg_trials.csv
-data/manifests/captions_simplified.jsonl
+data/manifests/structured_v2_video_manifest.jsonl
 data/EEG_and_EYE/<subject>/session*/EEG/eeg_data.npz
 ```
 
@@ -69,7 +69,7 @@ split 文件若未从旧输出保留，先重新构建：
 
 ```bash
 python scripts/build_eeg_split_plans.py \
-  --video-manifest data/manifests/captions_simplified.jsonl \
+  --video-manifest data/manifests/structured_v2_video_manifest.jsonl \
   --subject chentianlin \
   --output-dir outputs/eeg_wan/splits \
   --overwrite
@@ -103,7 +103,7 @@ python -m pytest -q \
 
 ```bash
 python scripts/build_eeg_semantic_labels.py \
-  --input data/manifests/captions_simplified.jsonl \
+  --input data/manifests/structured_v2_video_manifest.jsonl \
   --output outputs/semantic_labels/eeg_semantic_labels_v1.jsonl \
   --overwrite
 ```

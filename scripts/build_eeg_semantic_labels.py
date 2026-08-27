@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         type=Path,
-        default=ROOT / "data" / "manifests" / "captions_simplified.jsonl",
+        default=ROOT / "data" / "manifests" / "structured_v2_video_manifest.jsonl",
     )
     parser.add_argument(
         "--output",

@@ -28,7 +28,7 @@ seed 策略必须保持一致。Method-specific head 参数量单独报告。
 
 ## Semantic labels
 
-`captions_simplified.jsonl` 的 `caption_entities` 和 `caption_relations` 保留为原始审计字段。
+`structured_v2_video_manifest.jsonl` 的 `caption_entities` 和 `caption_relations` 保留为原始审计字段。
 核心实体由数据集 8 个预定义类别确定；自动产生的 coarse/fine action 标注统一带
 `derived_needs_audit`，在人工审查完成前不得称为人工真值。
 
