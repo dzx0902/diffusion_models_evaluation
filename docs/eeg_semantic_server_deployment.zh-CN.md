@@ -147,8 +147,12 @@ python scripts/cache_tora_text_states.py \
   --captions outputs/semantic_labels/eeg_semantic_labels_v1.jsonl \
   --t5-model "$TORA_ROOT/sat/ckpts/t5-v1_1-xxl" \
   --output-dir outputs/tora/text_cache \
-  --device cuda --batch-size 1 --save-dtype float32 --overwrite
+  --device cuda --batch-size 1 \
+  --model-dtype bfloat16 --save-dtype float32 --overwrite
 ```
+
+48 GB GPU 上不要用 FP32 加载 T5-XXL；`model-dtype` 控制推理显存，`save-dtype`
+独立控制落盘精度。
 
 必须确认 `outputs/tora/text_cache/metadata.json` 中：
 

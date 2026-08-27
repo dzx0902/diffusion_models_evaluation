@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--model-dtype",
+        choices=["float16", "bfloat16", "float32"],
+        default="bfloat16",
+        help="T5 inference dtype; bfloat16 keeps T5-XXL within a 48 GB GPU.",
+    )
     parser.add_argument("--save-dtype", choices=["float16", "bfloat16", "float32"], default="float32")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -88,7 +94,11 @@ def main() -> None:
         raise FileExistsError("Tora cache exists; pass --overwrite or choose a new output directory")
     device = torch.device(args.device)
     tokenizer = T5Tokenizer.from_pretrained(model_path)
-    model = T5EncoderModel.from_pretrained(model_path).eval().to(device)
+    model_dtype = getattr(torch, args.model_dtype)
+    model = T5EncoderModel.from_pretrained(
+        model_path,
+        torch_dtype=model_dtype,
+    ).eval().to(device)
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     save_dtype = getattr(torch, args.save_dtype)
@@ -142,6 +152,8 @@ def main() -> None:
         "t5_model": str(model_path),
         "max_length": TORA_TEXT_TOKENS,
         "hidden_dim": int(index_rows[0]["shape"][1]),
+        "model_dtype": args.model_dtype,
+        "save_dtype": args.save_dtype,
         "attention_mask_consumed_by_tora_reference": False,
         "reference": "alibaba/Tora sat/sgm/modules/encoders/modules.py FrozenT5Embedder",
         "record_count": len(index_rows),
