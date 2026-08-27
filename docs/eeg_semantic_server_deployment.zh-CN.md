@@ -56,10 +56,14 @@ cd "$PROJECT_ROOT"
 服务器的 `data/` 至少需要：
 
 ```text
-data/manifests/eeg_trials.csv
+data/manifests/chentianlin/eeg_trials.csv
 data/manifests/captions_simplified.jsonl
 data/EEG_and_EYE/<subject>/session*/EEG/eeg_data.npz
 ```
+
+`data/manifests/eeg_trials.csv` 是多被试汇总表，不得直接用于被试内训练。四个默认
+config 都固定使用 `chentianlin/eeg_trials.csv`；更换被试时必须同时更换
+trial manifest、split plan 和输出目录。
 
 split 文件若未从旧输出保留，先重新构建：
 

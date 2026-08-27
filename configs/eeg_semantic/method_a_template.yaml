@@ -5,7 +5,7 @@ experiment:
   output_dir: outputs/eeg_semantic/method_a_template/chentianlin/fold1/seed42
 
 data:
-  trials: data/manifests/eeg_trials.csv
+  trials: data/manifests/chentianlin/eeg_trials.csv
   semantic_labels: outputs/semantic_labels/eeg_semantic_labels_v1.jsonl
   split_plan: outputs/eeg_wan/splits/chentianlin_video_6fold_plan.json
   fold: video_6fold_1
