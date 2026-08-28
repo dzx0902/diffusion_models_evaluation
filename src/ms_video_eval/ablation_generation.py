@@ -63,17 +63,20 @@ def read_conditions(path: Path, kind: str) -> list[dict[str, str]]:
     return result
 
 
-def read_trajectories(path: Path | None) -> dict[str, str]:
+def read_trajectories(path: Path | None) -> dict[str, list[str]]:
     if path is None:
         return {}
-    rows: dict[str, str] = {}
+    rows: dict[str, list[str]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             row = json.loads(line)
             video_id = str(row["video_id"])
             if video_id in rows:
                 raise ValueError(f"Duplicate trajectory for {video_id}")
-            rows[video_id] = str(row["trajectory_path"])
+            values = row.get("trajectory_paths")
+            if values is None:
+                values = [row["trajectory_path"]]
+            rows[video_id] = [str(value) for value in values]
     return rows
 
 
@@ -86,7 +89,15 @@ def file_sha256(path: Path) -> str:
 
 
 def format_tokens(tokens: Iterable[str], variables: Mapping[str, Any]) -> list[str]:
-    return [token.format_map(variables) for token in tokens]
+    result = []
+    for token in tokens:
+        if token.startswith("{") and token.endswith("}"):
+            key = token[1:-1]
+            if isinstance(variables.get(key), (list, tuple)):
+                result.extend(map(str, variables[key]))
+                continue
+        result.append(token.format_map(variables))
+    return result
 
 
 def run_generation_matrix(
@@ -97,7 +108,7 @@ def run_generation_matrix(
     seeds: Iterable[int],
     output_root: Path,
     variables: Mapping[str, Any],
-    trajectories: Mapping[str, str] | None = None,
+    trajectories: Mapping[str, list[str]] | None = None,
     dry_run: bool = False,
     skip_existing: bool = False,
 ) -> list[dict[str, Any]]:
@@ -119,6 +130,10 @@ def run_generation_matrix(
             video_id = row["video_id"]
             if spec.requires_trajectory and video_id not in trajectories:
                 raise KeyError(f"Missing fixed trajectory for {video_id}")
+            raw_trajectories = trajectories.get(video_id, [])
+            trajectory_paths = (
+                [raw_trajectories] if isinstance(raw_trajectories, str) else list(raw_trajectories)
+            )
             for seed in seeds:
                 output = output_root / generator_id / f"{video_id}_seed{seed}.mp4"
                 temporary = output.with_name(f"{output.stem}.partial{output.suffix}")
@@ -128,7 +143,8 @@ def run_generation_matrix(
                     "video_id": video_id,
                     "seed": int(variables.get("training_seed", seed)),
                     "generation_seed": seed,
-                    "trajectory": trajectories.get(video_id, ""),
+                    "trajectory": (trajectory_paths or [""])[0],
+                    "trajectory_paths": trajectory_paths,
                     "output": str(temporary),
                 }
                 command = format_tokens(spec.command, values)
@@ -147,8 +163,10 @@ def run_generation_matrix(
                     "seed": seed,
                     "output": str(output),
                     "command": command,
-                    "trajectory": trajectories.get(video_id),
+                    "trajectory": (trajectory_paths or [None])[0],
+                    "trajectory_paths": trajectory_paths,
                     "trajectory_sha256": None,
+                    "trajectory_sha256s": [],
                     "status": "planned",
                     **{
                         key: variables[key]
@@ -156,9 +174,10 @@ def run_generation_matrix(
                         if key in variables
                     },
                 }
-                trajectory = trajectories.get(video_id)
-                if trajectory and Path(trajectory).is_file():
-                    record["trajectory_sha256"] = file_sha256(Path(trajectory))
+                if trajectory_paths and all(Path(path).is_file() for path in trajectory_paths):
+                    hashes = [file_sha256(Path(path)) for path in trajectory_paths]
+                    record["trajectory_sha256"] = hashes[0]
+                    record["trajectory_sha256s"] = hashes
                 if skip_existing and output.is_file() and output.stat().st_size:
                     record["status"] = "skipped_existing"
                 elif dry_run:

@@ -34,7 +34,10 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
     unmatched = [key for key, values in grouped.items() if set(values) != set(variants)]
     trajectory_mismatches = []
     for key, values in grouped.items():
-        hashes = {row.get("trajectory_sha256") for row in values.values() if row.get("trajectory_sha256")}
+        hashes = {
+            tuple(row.get("trajectory_sha256s") or [row.get("trajectory_sha256")])
+            for row in values.values() if row.get("trajectory_sha256")
+        }
         if len(hashes) > 1:
             trajectory_mismatches.append(key)
     failed = bool(duplicates or unmatched or trajectory_mismatches)

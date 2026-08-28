@@ -11,7 +11,7 @@ protocol:
                        wan2_2_5b, contentv_8b, hunyuanvideo_1_5]
   latent_generators: [tora_injected]
   generator_config: configs/eeg_semantic/generators.server.yaml
-  trajectory_manifest: outputs/tora/trajectories/fixed_test_trajectories.jsonl
+  trajectory_manifest: outputs/tora/trajectories/fold1_test/manifest.jsonl
 
 # Expand subjects/folds/seeds only after the fold-1 gate. Every override is
 # materialized into a standalone resolved YAML before training.

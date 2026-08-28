@@ -87,15 +87,21 @@ python scripts/export_tora_autoencoder_targets.py \
 A/B caption 可以进入全部 caption generator。C1/C2/C3 是 Tora 特定空间，只进入
 `tora_injected`，不能把 Tora latent 当成其他模型的原生 text state。
 
-先构建固定 test trajectory manifest：
+优先从 GT test videos 离线提取按实体区分的多轨迹。检测缺失帧只在同一视频内插值，
+不会读取 validation/test 的语义统计：
 
 ```bash
-python scripts/build_fixed_trajectory_manifest.py \
+conda run -n ms-video-eval python scripts/extract_fixed_tora_trajectories.py \
+  --video-manifest data/manifests/video_manifest.jsonl \
+  --semantic-labels outputs/semantic_labels/eeg_semantic_labels_v1.jsonl \
   --split-plan outputs/eeg_wan/splits/chentianlin_video_6fold_plan.json \
   --fold video_6fold_1 --partition test \
-  --trajectory-root /path/to/fixed/trajectories \
-  --output outputs/tora/trajectories/fixed_test_trajectories.jsonl
+  --output-dir outputs/tora/trajectories/fold1_test --skip-existing
 ```
+
+输出采用 Tora 官方 256×256 `x,y` 文本格式。每个 core entity 各一条轨迹；
+`coverage.csv` 必须人工检查，`fallback_only=1` 的实体不能静默视为可靠 GT 轨迹。
+若已有人工轨迹，可改用 `build_fixed_trajectory_manifest.py` 收集多个 txt 文件。
 
 每个生成记录保存 trajectory SHA256。生成完成后必须运行：
 

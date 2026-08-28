@@ -34,11 +34,13 @@ def main() -> None:
     ids = sorted(load_video_partitions(args.split_plan, args.fold)[args.partition])
     rows = []
     for video_id in ids:
-        path = args.trajectory_root / args.pattern.format(video_id=video_id)
-        if not path.is_file() or not path.stat().st_size:
-            raise FileNotFoundError(path)
+        pattern = args.pattern.format(video_id=video_id)
+        paths = sorted(path for path in args.trajectory_root.glob(pattern) if path.is_file() and path.stat().st_size)
+        if not paths:
+            raise FileNotFoundError(args.trajectory_root / pattern)
         rows.append({"schema_version": 1, "video_id": video_id,
-                     "trajectory_path": str(path.resolve()), "sha256": sha256(path),
+                     "trajectory_paths": [str(path.resolve()) for path in paths],
+                     "sha256s": [sha256(path) for path in paths],
                      "source": "fixed", "partition": args.partition, "fold": args.fold})
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")

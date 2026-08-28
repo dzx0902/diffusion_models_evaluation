@@ -9,7 +9,7 @@ generators:
     required_paths:
       - "{models_root}/Tora/diffusers-version/tora/t2v_pipeline.py"
       - "{models_root}/Tora_T2V_diffusers/model_index.json"
-      - "{trajectory}"
+      - "{trajectory_paths}"
     command:
       - conda
       - run
@@ -26,7 +26,7 @@ generators:
       - --prompt
       - "{prompt}"
       - --point-path
-      - "{trajectory}"
+      - "{trajectory_paths}"
       - --output
       - "{output}"
       - --num-frames
@@ -45,7 +45,7 @@ generators:
       - "{models_root}/Tora/diffusers-version/tora/t2v_pipeline.py"
       - "{models_root}/Tora_T2V_diffusers/model_index.json"
       - "{condition}"
-      - "{trajectory}"
+      - "{trajectory_paths}"
     command:
       - conda
       - run
@@ -62,7 +62,7 @@ generators:
       - --condition
       - "{condition}"
       - --point-path
-      - "{trajectory}"
+      - "{trajectory_paths}"
       - --output
       - "{output}"
       - --num-frames

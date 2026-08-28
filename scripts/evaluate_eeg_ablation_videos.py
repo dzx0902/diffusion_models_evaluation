@@ -41,11 +41,13 @@ def main() -> None:
             video_id = str(item["video_id"]); record = labels[video_id]
             frames = sample_video(Path(item["output"]), args.sample_every)
             metrics = frame_diagnostics(frames)
-            trajectory = item.get("trajectory")
-            if trajectory:
-                metrics["trajectory_direction_score"] = trajectory_direction_score(
-                    frames, parse_trajectory_points(Path(trajectory))
-                )
+            trajectories = item.get("trajectory_paths") or ([item["trajectory"]] if item.get("trajectory") else [])
+            if trajectories:
+                scores = [
+                    trajectory_direction_score(frames, parse_trajectory_points(Path(path)))
+                    for path in trajectories
+                ]
+                metrics["trajectory_direction_score"] = sum(scores) / len(scores)
             if scorer is not None:
                 metrics["semantic_clip_score"] = scorer.score(frames, record.caption)
                 if record.subjects:
