@@ -1,0 +1,187 @@
+schema_version: 1
+
+protocol:
+  subjects: [chentianlin]
+  folds: [video_6fold_1]
+  seeds: [42]
+  run_dir_template: outputs/eeg_semantic/runs/{variant}/{subject}/{fold}/seed{seed}
+  trajectory_source: fixed_gt
+  generation_seeds: [0, 1, 2]
+  caption_generators: [tora, animatediff, zeroscope, cogvideox2b, cogvideox1_5_5b,
+                       wan2_2_5b, contentv_8b, hunyuanvideo_1_5]
+  latent_generators: [tora_injected]
+  generator_config: configs/eeg_semantic/generators.server.yaml
+  trajectory_manifest: outputs/tora/trajectories/fixed_test_trajectories.jsonl
+
+# Expand subjects/folds/seeds only after the fold-1 gate. Every override is
+# materialized into a standalone resolved YAML before training.
+variants:
+  - id: a_base
+    base_config: configs/eeg_semantic/method_a_template.yaml
+    overrides:
+      loss: {contrastive: 0.0, session_consistency: 0.0, prototype: 0.0}
+      training: {gradient_accumulation_steps: 1}
+
+  - id: a_enhanced
+    base_config: configs/eeg_semantic/method_a_template.yaml
+    overrides:
+      loss: {contrastive: 0.2, session_consistency: 0.1, prototype: 0.05}
+      contrastive:
+        temperature: 0.07
+        positive_weights: {same_video: 1.0, same_full_semantics: 0.8,
+                           same_action_object: 0.6, same_action: 0.4}
+      augmentation:
+        gaussian_noise_std: 0.01
+        temporal_mask_probability: 0.25
+        temporal_mask_fraction: 0.05
+        channel_dropout_probability: 0.03
+        amplitude_scale_min: 0.9
+        amplitude_scale_max: 1.1
+        temporal_shift_samples: 5
+
+  - id: b_base
+    base_config: configs/eeg_semantic/method_b_structured.yaml
+    overrides:
+      loss: {contrastive: 0.0, session_consistency: 0.0, prototype: 0.0}
+
+  - id: b_enhanced
+    base_config: configs/eeg_semantic/method_b_structured.yaml
+    overrides:
+      loss: {contrastive: 0.2, session_consistency: 0.1, prototype: 0.05}
+      contrastive:
+        temperature: 0.07
+        positive_weights: {same_video: 1.0, same_full_semantics: 0.8,
+                           same_action_object: 0.6, same_action: 0.4}
+      augmentation:
+        gaussian_noise_std: 0.01
+        temporal_mask_probability: 0.25
+        temporal_mask_fraction: 0.05
+        channel_dropout_probability: 0.03
+        amplitude_scale_min: 0.9
+        amplitude_scale_max: 1.1
+        temporal_shift_samples: 5
+
+  - id: c1_mse
+    base_config: configs/eeg_semantic/method_c_direct_tora.yaml
+    overrides:
+      loss: {mse: 1.0, cosine: 0.0, contrastive: 0.0, auxiliary_classification: 0.0,
+             session_consistency: 0.0, prototype: 0.0}
+      training: {batch_size: 3, gradient_accumulation_steps: 8}
+
+  - id: c1_full
+    base_config: configs/eeg_semantic/method_c_direct_tora.yaml
+    overrides:
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.1,
+             session_consistency: 0.1, prototype: 0.05}
+      contrastive:
+        mode: soft_semantic
+        temperature: 0.07
+        semantic_temperature: 0.07
+      training: {batch_size: 3, gradient_accumulation_steps: 8}
+      curriculum:
+        enabled: true
+        classification: {start: 2.0, end: 0.5}
+        alignment: {start: 0.5, end: 1.0}
+
+  - id: c2_mse
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      loss: {mse: 1.0, cosine: 0.0, contrastive: 0.0, auxiliary_classification: 0.0,
+             session_consistency: 0.0, prototype: 0.0}
+
+  - id: c2_pca128
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      model: {condition_dim: 128}
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.1,
+             session_consistency: 0.1, prototype: 0.0}
+
+  - id: c2_pca256
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      model: {condition_dim: 256}
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.1,
+             session_consistency: 0.1, prototype: 0.0}
+
+  - id: c2_pca1024
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      model: {condition_dim: 1024}
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.1,
+             session_consistency: 0.1, prototype: 0.0}
+
+  - id: c2_pca2048
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      model: {condition_dim: 2048}
+      training: {batch_size: 12, gradient_accumulation_steps: 2}
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.1,
+             session_consistency: 0.1, prototype: 0.0}
+
+  - id: c2_contrastive
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.0,
+             session_consistency: 0.0, prototype: 0.0}
+      contrastive: {mode: hard_multi_positive, temperature: 0.07}
+
+  - id: c2_soft_contrastive
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.0,
+             session_consistency: 0.0, prototype: 0.0}
+      contrastive: {mode: soft_semantic, temperature: 0.07, semantic_temperature: 0.07}
+
+  - id: c2_session
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.0,
+             session_consistency: 0.1, prototype: 0.0}
+      contrastive: {mode: soft_semantic, temperature: 0.07, semantic_temperature: 0.07}
+
+  - id: c2_auxiliary
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.1,
+             session_consistency: 0.1, prototype: 0.0}
+      contrastive: {mode: soft_semantic, temperature: 0.07, semantic_temperature: 0.07}
+
+  - id: c2_prototype
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.1,
+             session_consistency: 0.1, prototype: 0.05}
+      contrastive: {mode: soft_semantic, temperature: 0.07, semantic_temperature: 0.07}
+
+  - id: c2_centroid
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      data:
+        tora_target_index_template: outputs/tora/centroid/pca/fold{fold_index}/dim512/index.jsonl
+        pca_projector_template: outputs/tora/centroid/pca/fold{fold_index}/tora_text_pca_1024.npz
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.1,
+             session_consistency: 0.1, prototype: 0.05}
+      contrastive: {mode: soft_semantic, temperature: 0.07, semantic_temperature: 0.07}
+
+  - id: c2_full
+    base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+    overrides:
+      loss: {mse: 1.0, cosine: 0.2, contrastive: 0.2, auxiliary_classification: 0.1,
+             session_consistency: 0.1, prototype: 0.05}
+      contrastive: {mode: soft_semantic, temperature: 0.07, semantic_temperature: 0.07}
+      augmentation:
+        gaussian_noise_std: 0.01
+        temporal_mask_probability: 0.25
+        temporal_mask_fraction: 0.05
+        channel_dropout_probability: 0.03
+        amplitude_scale_min: 0.9
+        amplitude_scale_max: 1.1
+        temporal_shift_samples: 5
+      curriculum:
+        enabled: true
+        classification: {start: 2.0, end: 0.5}
+        alignment: {start: 0.5, end: 1.0}
+
+  - id: c3_autoencoder512
+    base_config: configs/eeg_semantic/method_c_autoencoder_tora.yaml
+    overrides: {}

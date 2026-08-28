@@ -208,6 +208,7 @@ def main() -> None:
         video_logits, video_targets, video_masks, thresholds
     )
     video_records = []
+    video_metric_records = []
     for index, video_id in enumerate(video_ids):
         predictions = selected_predictions(video_logits, vocabulary, thresholds, index)
         video_records.append(
@@ -227,6 +228,22 @@ def main() -> None:
                 },
             }
         )
+        metric_row: dict[str, Any] = {"video_id": video_id}
+        for slot, values in video_logits.items():
+            valid = bool(video_masks[slot][index])
+            predicted_binary = torch.sigmoid(values[index]) >= thresholds.get(slot, 0.5)
+            target_binary = video_targets[slot][index].bool()
+            metric_row[f"{slot}_exact_match"] = (
+                float(torch.equal(predicted_binary, target_binary)) if valid else None
+            )
+            if valid:
+                tp = int((predicted_binary & target_binary).sum())
+                fp = int((predicted_binary & ~target_binary).sum())
+                fn = int((~predicted_binary & target_binary).sum())
+                metric_row[f"{slot}_f1"] = 2 * tp / max(1, 2 * tp + fp + fn)
+            else:
+                metric_row[f"{slot}_f1"] = None
+        video_metric_records.append(metric_row)
     output_dir = args.output_dir or args.checkpoint.parent / f"{args.partition}_semantic"
     if args.smoke:
         output_dir = ROOT / "outputs" / "semantic_smoke" / "evaluation"
@@ -241,6 +258,7 @@ def main() -> None:
         "video_aggregation_metrics": video_metrics,
         "trial_records": trial_records,
         "video_aggregation_records": video_records,
+        "video_metric_records": video_metric_records,
     }
     path = output_dir / "predictions.json"
     path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

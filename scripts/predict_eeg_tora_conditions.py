@@ -34,6 +34,7 @@ from ms_video_eval.tora_conditioning import (
     load_tora_condition,
     read_tora_condition_index,
 )
+from ms_video_eval.tora_text_autoencoder import ToraTextAutoencoder, ToraTextAutoencoderConfig
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,7 +72,7 @@ def main() -> None:
     device = torch.device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     method = checkpoint["method"]
-    if method not in {"direct_tora_text", "tora_pca"}:
+    if method not in {"direct_tora_text", "tora_pca", "tora_autoencoder"}:
         raise ValueError(f"Unsupported checkpoint method: {method}")
     config = checkpoint["config"]
     data = config["data"]
@@ -108,16 +109,26 @@ def main() -> None:
         target_mean = target_mean.to(device)
     target_index = read_tora_condition_index(resolve_path(data["tora_target_index"]))
     projector = None
+    autoencoder = None
     if method == "tora_pca":
         projector = ToraPCAProjector.load(
             resolve_path(data["pca_projector"]), dim=encoder_config.latent_dim
         )
+    elif method == "tora_autoencoder":
+        autoencoder_checkpoint = torch.load(
+            resolve_path(data["autoencoder_checkpoint"]), map_location=device, weights_only=False
+        )
+        autoencoder = ToraTextAutoencoder(
+            ToraTextAutoencoderConfig(**autoencoder_checkpoint["config"])
+        ).to(device)
+        autoencoder.load_state_dict(autoencoder_checkpoint["state_dict"])
+        autoencoder.eval()
     trial_dir = args.output_dir / "trials"
     video_dir = args.output_dir / "video_aggregated"
     trial_dir.mkdir(parents=True, exist_ok=True)
     video_dir.mkdir(parents=True, exist_ok=True)
     trial_rows = []
-    groups: dict[str, list[Path]] = {}
+    groups: dict[str, list[tuple[Path, torch.Tensor]]] = {}
     mse_sum = cosine_sum = 0.0
     count = 0
     with torch.inference_mode():
@@ -132,7 +143,12 @@ def main() -> None:
             mse_sum += float(F.mse_loss(latent, targets, reduction="sum"))
             cosine_sum += float(F.cosine_similarity(latent, targets, dim=-1).sum())
             count += latent.shape[0] * latent.shape[1]
-            full_state = projector.decode(latent.float().cpu()) if projector else latent.float().cpu()
+            if projector:
+                full_state = projector.decode(latent.float().cpu())
+            elif autoencoder:
+                full_state = autoencoder.decode(latent).float().cpu()
+            else:
+                full_state = latent.float().cpu()
             for index, (video_id, session) in enumerate(zip(batch["video_id"], batch["session"])):
                 path = trial_dir / f"{video_id}_{session}.pt"
                 torch.save(
@@ -147,15 +163,30 @@ def main() -> None:
                     },
                     path,
                 )
-                groups.setdefault(video_id, []).append(path)
+                groups.setdefault(video_id, []).append((path, latent[index].float().cpu()))
                 trial_rows.append(
-                    {"video_id": video_id, "session": session, "condition_path": str(path.resolve())}
+                    {
+                        "video_id": video_id,
+                        "session": session,
+                        "condition_path": str(path.resolve()),
+                        "target_space_mse": float(F.mse_loss(latent[index], targets[index])),
+                        "target_space_token_cosine": float(
+                            F.cosine_similarity(latent[index], targets[index], dim=-1).mean()
+                        ),
+                    }
                 )
             if args.smoke:
                 break
     video_rows = []
-    for video_id, paths in groups.items():
+    retrieval_predictions = []
+    retrieval_targets = []
+    for video_id, items in groups.items():
+        paths = [item[0] for item in items]
         states = [load_tora_condition(path).hidden_state for path in paths]
+        mean_latent = torch.stack([item[1] for item in items]).mean(dim=0)
+        target = load_target(target_index[video_id], method)
+        retrieval_predictions.append(mean_latent.mean(dim=0))
+        retrieval_targets.append(target.mean(dim=0))
         path = video_dir / f"{video_id}.pt"
         torch.save(
             {
@@ -170,8 +201,20 @@ def main() -> None:
             path,
         )
         video_rows.append(
-            {"video_id": video_id, "condition_path": str(path.resolve()), "trial_count": len(paths)}
+            {
+                "video_id": video_id,
+                "condition_path": str(path.resolve()),
+                "trial_count": len(paths),
+                "target_space_mse": float(F.mse_loss(mean_latent, target)),
+                "target_space_token_cosine": float(
+                    F.cosine_similarity(mean_latent, target, dim=-1).mean()
+                ),
+            }
         )
+    predicted_matrix = F.normalize(torch.stack(retrieval_predictions), dim=-1)
+    target_matrix = F.normalize(torch.stack(retrieval_targets), dim=-1)
+    ranking = (predicted_matrix @ target_matrix.t()).argsort(dim=1, descending=True)
+    truth = torch.arange(len(video_rows)).unsqueeze(1)
     report = {
         "schema_version": 1,
         "checkpoint": str(args.checkpoint.resolve()),
@@ -183,6 +226,10 @@ def main() -> None:
         "video_count": len(video_rows),
         "single_trial_primary": True,
         "session_aggregation_is_secondary": True,
+        "video_retrieval_top1": float((ranking[:, :1] == truth).any(dim=1).float().mean()),
+        "video_retrieval_top5": float(
+            (ranking[:, : min(5, ranking.shape[1])] == truth).any(dim=1).float().mean()
+        ),
     }
     (args.output_dir / "trial_index.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in trial_rows), encoding="utf-8"

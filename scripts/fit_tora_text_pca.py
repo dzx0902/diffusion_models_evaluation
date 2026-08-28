@@ -98,6 +98,17 @@ def main() -> None:
         "raw_dim": int(projector.components_.shape[1]),
         "components": int(projector.components_.shape[0]),
         "explained_variance_ratio_sum": float(projector.explained_variance_ratio_.sum()),
+        "suggested_dimensions": {
+            str(target): int(
+                min(
+                    len(projector.explained_variance_ratio_),
+                    np.searchsorted(
+                        np.cumsum(projector.explained_variance_ratio_), target / 100.0
+                    ) + 1,
+                )
+            )
+            for target in (90, 95, 99)
+        },
     }
     args.output.with_suffix(".metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"

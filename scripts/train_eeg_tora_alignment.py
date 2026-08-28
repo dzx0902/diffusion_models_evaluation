@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 import yaml
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 
@@ -27,6 +28,7 @@ from ms_video_eval.eeg_semantic import (
     cross_session_consistency_loss,
     full_text_alignment_loss,
     multi_positive_contrastive_loss,
+    semantic_soft_contrastive_loss,
     semantic_slot_loss,
 )
 from ms_video_eval.semantic_data import (
@@ -44,6 +46,15 @@ from ms_video_eval.tora_conditioning import (
     TORA_TEXT_TOKENS,
     load_tora_condition,
     read_tora_condition_index,
+)
+from ms_video_eval.semantic_tricks import (
+    EEGAugmentationConfig,
+    augment_eeg,
+    curriculum_multiplier,
+    fixed_prototype_loss,
+    hierarchical_positive_weights,
+    semantic_similarity_matrix,
+    weighted_positive_contrastive_loss,
 )
 
 
@@ -119,7 +130,7 @@ class EEGToraAlignmentDataset(EEGSemanticDataset):
             row = self.target_index[video_id]
             if self.target_kind == "direct_tora_text":
                 value = load_tora_condition(Path(row["condition_path"])).hidden_state
-            elif self.target_kind == "tora_pca":
+            elif self.target_kind in {"tora_pca", "tora_autoencoder"}:
                 payload = torch.load(row["latent_path"], map_location="cpu", weights_only=False)
                 value = payload["latent"].float()
             else:
@@ -159,7 +170,7 @@ def compute_train_target_mean(
     for video_id in sorted(video_ids):
         if target_kind == "direct_tora_text":
             value = load_tora_condition(Path(index[video_id]["condition_path"])).hidden_state
-        elif target_kind == "tora_pca":
+        elif target_kind in {"tora_pca", "tora_autoencoder"}:
             payload = torch.load(
                 index[video_id]["latent_path"], map_location="cpu", weights_only=False
             )
@@ -170,6 +181,41 @@ def compute_train_target_mean(
         count += 1
     assert total is not None
     return (total / count).float()
+
+
+def load_target_state(row: dict[str, Any], target_kind: str) -> torch.Tensor:
+    if target_kind == "direct_tora_text":
+        return load_tora_condition(Path(row["condition_path"])).hidden_state.float()
+    if target_kind in {"tora_pca", "tora_autoencoder"}:
+        return torch.load(row["latent_path"], map_location="cpu", weights_only=False)["latent"].float()
+    raise ValueError(f"Unknown target kind: {target_kind}")
+
+
+def compute_train_prototypes(
+    index: dict[str, dict[str, Any]],
+    video_ids: set[str],
+    target_kind: str,
+    record_map: dict[str, Any],
+    vocabulary: SemanticVocabulary,
+) -> dict[str, torch.Tensor]:
+    """Build semantic class centers from training videos only."""
+
+    dimension = load_target_state(index[next(iter(sorted(video_ids)))], target_kind).shape[-1]
+    sums = {
+        slot: torch.zeros(len(values), dimension, dtype=torch.float64)
+        for slot, values in vocabulary.values.items()
+    }
+    counts = {slot: torch.zeros(len(values), dtype=torch.float64) for slot, values in vocabulary.values.items()}
+    for video_id in sorted(video_ids):
+        pooled = load_target_state(index[video_id], target_kind).mean(dim=0).double()
+        targets, _ = vocabulary.encode(record_map[video_id])
+        for slot, labels in targets.items():
+            sums[slot] += labels.double().unsqueeze(1) * pooled.unsqueeze(0)
+            counts[slot] += labels.double()
+    return {
+        slot: (values / counts[slot].clamp_min(1).unsqueeze(1)).float()
+        for slot, values in sums.items()
+    }
 
 
 def make_loader(
@@ -198,8 +244,10 @@ def loss_for_batch(
     batch: dict[str, Any],
     device: torch.device,
     weights: dict[str, float],
-    contrastive_temperature: float,
+    contrastive_config: dict[str, Any],
     target_mean: torch.Tensor | None,
+    prototypes: dict[str, torch.Tensor] | None = None,
+    scales: dict[str, float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     output = model(batch["eeg"].to(device))
     target = batch["text_state"].to(device)
@@ -212,28 +260,88 @@ def loss_for_batch(
         mse_weight=weights["mse"],
         cosine_weight=weights["cosine"],
     )
-    contrastive = multi_positive_contrastive_loss(
-        predicted.mean(dim=1),
-        target.mean(dim=1),
-        positive_mask(batch["video_id"], device),
-        temperature=contrastive_temperature,
+    predicted_pooled = predicted.mean(dim=1)
+    target_pooled = target.mean(dim=1)
+    temperature = float(contrastive_config.get("temperature", 0.07))
+    mode = str(contrastive_config.get("mode", "hard_multi_positive"))
+    semantic_similarity = semantic_similarity_matrix(
+        {key: value.to(device) for key, value in batch["targets"].items()},
+        {key: value.to(device) for key, value in batch["target_masks"].items()},
+        contrastive_config.get("slot_weights"),
     )
+    if mode == "hard_multi_positive":
+        contrastive = multi_positive_contrastive_loss(
+            predicted_pooled, target_pooled, positive_mask(batch["video_id"], device),
+            temperature=temperature,
+        )
+    elif mode == "weighted_multi_positive":
+        values = contrastive_config.get("positive_weights", {})
+        contrastive = weighted_positive_contrastive_loss(
+            predicted_pooled,
+            target_pooled,
+            hierarchical_positive_weights(
+                batch["video_id"],
+                {key: value.to(device) for key, value in batch["targets"].items()},
+                {key: value.to(device) for key, value in batch["target_masks"].items()},
+                values,
+            ),
+            temperature=temperature,
+        )
+    elif mode == "soft_semantic":
+        contrastive = semantic_soft_contrastive_loss(
+            predicted_pooled,
+            target_pooled,
+            semantic_similarity,
+            temperature=temperature,
+            semantic_temperature=float(contrastive_config.get("semantic_temperature", 0.07)),
+        )
+    else:
+        raise ValueError(f"Unknown contrastive mode: {mode}")
     session = cross_session_consistency_loss(output["feature"], batch["video_id"])
     auxiliary, aux_values = semantic_slot_loss(
         output["auxiliary_logits"], batch["targets"], batch["target_masks"]
     )
+    auxiliary_accuracy = {}
+    with torch.no_grad():
+        for slot, logits in output["auxiliary_logits"].items():
+            valid = batch["target_masks"][slot].to(device).bool()
+            predicted_labels = torch.sigmoid(logits) >= 0.5
+            target_labels = batch["targets"][slot].to(device).bool()
+            auxiliary_accuracy[slot] = float(
+                (predicted_labels[valid] == target_labels[valid]).all(dim=-1).float().mean()
+            ) if valid.any() else 0.0
+    prototype = (
+        fixed_prototype_loss(
+            predicted_pooled, prototypes, batch["targets"], batch["target_masks"],
+            contrastive_config.get("prototype_slot_weights"),
+        )
+        if prototypes
+        else predicted.new_zeros(())
+    )
+    scales = scales or {"alignment": 1.0, "classification": 1.0}
+    with torch.no_grad():
+        retrieval = F.normalize(predicted_pooled, dim=-1) @ F.normalize(target_pooled, dim=-1).t()
+        positives = positive_mask(batch["video_id"], device)
+        order = retrieval.argsort(dim=1, descending=True)
+        top1 = positives.gather(1, order[:, :1]).any(dim=1).float().mean()
+        top5 = positives.gather(1, order[:, : min(5, order.shape[1])]).any(dim=1).float().mean()
     total = (
-        alignment
-        + weights["contrastive"] * contrastive
-        + weights["auxiliary_classification"] * auxiliary
+        scales["alignment"] * alignment
+        + scales["alignment"] * weights["contrastive"] * contrastive
+        + scales["classification"] * weights["auxiliary_classification"] * auxiliary
         + weights["session_consistency"] * session
+        + weights["prototype"] * prototype
     )
     return total, {
         **values,
         "contrastive": float(contrastive.detach()),
         "auxiliary": float(auxiliary.detach()),
         "session_consistency": float(session.detach()),
+        "prototype": float(prototype.detach()),
+        "retrieval_top1": float(top1),
+        "retrieval_top5": float(top5),
         **{f"aux_{key}": value for key, value in aux_values.items()},
+        **{f"aux_{key}_exact_match": value for key, value in auxiliary_accuracy.items()},
     }
 
 
@@ -243,8 +351,10 @@ def evaluate(
     loader: DataLoader,
     device: torch.device,
     weights: dict[str, float],
-    temperature: float,
+    contrastive_config: dict[str, Any],
     target_mean: torch.Tensor | None,
+    prototypes: dict[str, torch.Tensor] | None = None,
+    scales: dict[str, float] | None = None,
     max_batches: int | None = None,
 ) -> dict[str, float]:
     model.eval()
@@ -252,7 +362,7 @@ def evaluate(
     examples = 0
     for batch_index, batch in enumerate(loader):
         loss, values = loss_for_batch(
-            model, batch, device, weights, temperature, target_mean
+            model, batch, device, weights, contrastive_config, target_mean, prototypes, scales
         )
         values["loss"] = float(loss)
         size = batch["eeg"].shape[0]
@@ -270,8 +380,8 @@ def main() -> None:
         raise ValueError("--smoke and --resume cannot be combined")
     config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     method = config["experiment"]["method"]
-    if method not in {"direct_tora_text", "tora_pca"}:
-        raise ValueError("Expected direct_tora_text or tora_pca")
+    if method not in {"direct_tora_text", "tora_pca", "tora_autoencoder"}:
+        raise ValueError("Expected direct_tora_text, tora_pca, or tora_autoencoder")
     seed = int(config["experiment"].get("seed", 42))
     seed_everything(seed)
     device = torch.device(
@@ -353,11 +463,24 @@ def main() -> None:
         for key, default in (
             ("mse", 1.0), ("cosine", 0.2), ("contrastive", 0.2),
             ("auxiliary_classification", 0.1), ("session_consistency", 0.1),
+            ("prototype", 0.0),
         )
     }
     if any(value < 0 for value in weights.values()):
         raise ValueError("Loss weights must be non-negative")
-    temperature = float(config["contrastive"].get("temperature", 0.07))
+    contrastive_config = config.get("contrastive", {})
+    augmentation = EEGAugmentationConfig.from_mapping(config.get("augmentation"))
+    curriculum = config.get("curriculum", {})
+    accumulation_steps = int(training.get("gradient_accumulation_steps", 1))
+    if accumulation_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be positive")
+    prototypes = (
+        compute_train_prototypes(
+            target_index, partitions["train"], method, record_map, vocabulary
+        )
+        if weights["prototype"] > 0
+        else None
+    )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(training.get("learning_rate", 2e-4)),
@@ -383,7 +506,15 @@ def main() -> None:
         raise FileExistsError(f"Refusing to overwrite existing run: {history_path}")
     if args.resume and not (output_dir / "last.pt").is_file():
         raise FileNotFoundError(f"Cannot resume without {output_dir / 'last.pt'}")
+    writer = None
+    if bool(config.get("logging", {}).get("tensorboard", True)):
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+        except ImportError as exc:
+            raise ImportError("TensorBoard logging is enabled; install requirements-eeg-semantic.txt") from exc
+        writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
     best = float("inf")
+    best_semantic = float("inf")
     start_epoch = 1
     if args.resume:
         checkpoint = torch.load(output_dir / "last.pt", map_location=device, weights_only=False)
@@ -403,44 +534,81 @@ def main() -> None:
         scaler.load_state_dict(checkpoint["scaler_state"])
         restore_rng_state(checkpoint["rng_state"], generator)
         best = float(checkpoint["best_loss"])
+        best_semantic = float(checkpoint.get("best_semantic_loss", float("inf")))
         start_epoch = int(checkpoint["epoch"]) + 1
         print(f"[eeg-tora] resuming at epoch {start_epoch} with best={best:.6f}", flush=True)
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         train_sum = 0.0
         examples = 0
+        component_sums: dict[str, float] = {}
+        scales = {
+            "classification": curriculum_multiplier(
+                epoch, epochs, curriculum, "classification"
+            ),
+            "alignment": curriculum_multiplier(epoch, epochs, curriculum, "alignment"),
+        }
+        optimizer.zero_grad(set_to_none=True)
         for batch_index, batch in enumerate(train_loader):
-            optimizer.zero_grad(set_to_none=True)
+            batch["eeg"] = augment_eeg(batch["eeg"].to(device), augmentation)
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
-                loss, _ = loss_for_batch(
-                    model, batch, device, weights, temperature, target_mean
+                loss, components = loss_for_batch(
+                    model, batch, device, weights, contrastive_config, target_mean,
+                    prototypes, scales,
                 )
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(training.get("grad_clip", 1.0)))
-            scaler.step(optimizer)
-            scaler.update()
+            scaler.scale(loss / accumulation_steps).backward()
+            should_step = (
+                args.smoke
+                or (batch_index + 1) % accumulation_steps == 0
+                or batch_index + 1 == len(train_loader)
+            )
+            if should_step:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), float(training.get("grad_clip", 1.0))
+                )
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
             size = batch["eeg"].shape[0]
             train_sum += float(loss.detach()) * size
             examples += size
+            for key, value in components.items():
+                component_sums[key] = component_sums.get(key, 0.0) + value * size
             if args.smoke:
                 break
         scheduler.step()
         valid = evaluate(
-            model, validation_loader, device, weights, temperature, target_mean,
+            model, validation_loader, device, weights, contrastive_config, target_mean,
+            prototypes, scales,
             max_batches=1 if args.smoke else None,
         )
         record = {
             "epoch": epoch,
             "train_loss": train_sum / max(1, examples),
+            "train_components": {
+                key: value / max(1, examples) for key, value in component_sums.items()
+            },
+            "curriculum_scales": scales,
             "validation": valid,
             "learning_rate": optimizer.param_groups[0]["lr"],
         }
         with history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
+        if writer is not None:
+            writer.add_scalar("loss/train_total", record["train_loss"], epoch)
+            writer.add_scalar("loss/validation", valid["loss"], epoch)
+            writer.add_scalar("metrics/validation_mse", valid["mse"], epoch)
+            writer.add_scalar("optimization/learning_rate", record["learning_rate"], epoch)
+            for key, value in record["train_components"].items():
+                writer.add_scalar(f"loss_components/{key}", value, epoch)
+            writer.flush()
         score = float(valid["loss"])
         is_best = score < best
         best = min(best, score)
+        semantic_score = float(valid["auxiliary"])
+        is_best_semantic = semantic_score < best_semantic
+        best_semantic = min(best_semantic, semantic_score)
         payload = {
             "schema_version": 1,
             "method": method,
@@ -455,11 +623,15 @@ def main() -> None:
             "scheduler_state": scheduler.state_dict(),
             "scaler_state": scaler.state_dict(),
             "best_loss": best,
+            "best_semantic_loss": best_semantic,
             "rng_state": capture_rng_state(generator),
         }
         atomic_torch_save(payload, output_dir / "last.pt")
         if is_best:
             atomic_torch_save(payload, output_dir / "best.pt")
+            atomic_torch_save(payload, output_dir / "best_overall.pt")
+        if is_best_semantic:
+            atomic_torch_save(payload, output_dir / "best_semantic.pt")
         print(
             f"[eeg-tora] epoch={epoch}/{epochs} train_loss={record['train_loss']:.4f} "
             f"val_loss={valid['loss']:.4f} val_mse={valid['mse']:.6f}",
@@ -467,6 +639,8 @@ def main() -> None:
         )
     if start_epoch > epochs:
         print(f"[eeg-tora] run already completed {epochs} epochs", flush=True)
+    if writer is not None:
+        writer.close()
     print(f"[eeg-tora] best checkpoint: {output_dir / 'best.pt'}")
 
 

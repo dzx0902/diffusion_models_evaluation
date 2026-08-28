@@ -1,0 +1,151 @@
+schema_version: 1
+
+# Linux/WSL server paths are expressed relative to --models-root. Commands are
+# token lists (never shell strings), so captions with punctuation are passed safely.
+generators:
+  - id: tora
+    condition_kinds: [caption]
+    requires_trajectory: true
+    required_paths:
+      - "{models_root}/Tora/diffusers-version/tora/t2v_pipeline.py"
+      - "{models_root}/Tora_T2V_diffusers/model_index.json"
+      - "{trajectory}"
+    command:
+      - conda
+      - run
+      - -n
+      - tora
+      - python
+      - "{repo_root}/scripts/adapters/tora_diffusers_condition_generate.py"
+      - --tora-repo
+      - "{models_root}/Tora"
+      - --model-root
+      - "{models_root}/Tora_T2V_diffusers"
+      - --conditioning
+      - native
+      - --prompt
+      - "{prompt}"
+      - --point-path
+      - "{trajectory}"
+      - --output
+      - "{output}"
+      - --num-frames
+      - "49"
+      - --fps
+      - "8"
+      - --seed
+      - "{seed}"
+      - --offload
+      - model
+
+  - id: tora_injected
+    condition_kinds: [tora_state]
+    requires_trajectory: true
+    required_paths:
+      - "{models_root}/Tora/diffusers-version/tora/t2v_pipeline.py"
+      - "{models_root}/Tora_T2V_diffusers/model_index.json"
+      - "{condition}"
+      - "{trajectory}"
+    command:
+      - conda
+      - run
+      - -n
+      - tora
+      - python
+      - "{repo_root}/scripts/adapters/tora_diffusers_condition_generate.py"
+      - --tora-repo
+      - "{models_root}/Tora"
+      - --model-root
+      - "{models_root}/Tora_T2V_diffusers"
+      - --conditioning
+      - injected
+      - --condition
+      - "{condition}"
+      - --point-path
+      - "{trajectory}"
+      - --output
+      - "{output}"
+      - --num-frames
+      - "49"
+      - --fps
+      - "8"
+      - --seed
+      - "{seed}"
+      - --offload
+      - model
+
+  - id: animatediff
+    condition_kinds: [caption]
+    required_paths:
+      - "{models_root}/AnimateDiff/sd-v1-5/model_index.json"
+      - "{models_root}/AnimateDiff/motion-adapter-v1-5-2/config.json"
+    command: [conda, run, -n, clip-video, python,
+      "{repo_root}/scripts/adapters/clip_video_generate.py",
+      --backend, animatediff, --model-root, "{models_root}/AnimateDiff/sd-v1-5",
+      --motion-adapter, "{models_root}/AnimateDiff/motion-adapter-v1-5-2",
+      --prompt, "{prompt}", --output, "{output}", --dtype, bfloat16,
+      --num-frames, "32", --fps, "8", --height, "512", --width, "512",
+      --steps, "25", --guidance-scale, "7.5", --seed, "{seed}", --enable-tf32]
+
+  - id: zeroscope
+    condition_kinds: [caption]
+    required_paths: ["{models_root}/ZeroScope/zeroscope_v2_576w/model_index.json"]
+    command: [conda, run, -n, clip-video, python,
+      "{repo_root}/scripts/adapters/clip_video_generate.py",
+      --backend, zeroscope, --model-root, "{models_root}/ZeroScope/zeroscope_v2_576w",
+      --prompt, "{prompt}", --output, "{output}", --dtype, float16,
+      --num-frames, "32", --fps, "8", --height, "320", --width, "576",
+      --steps, "25", --guidance-scale, "7.5", --seed, "{seed}", --enable-tf32]
+
+  - id: cogvideox2b
+    condition_kinds: [caption]
+    required_paths: ["{models_root}/CogVideoX-2b/model_index.json"]
+    command: [conda, run, -n, clip-video, python,
+      "{repo_root}/scripts/adapters/cogvideox_condition_generate.py",
+      --model-root, "{models_root}/CogVideoX-2b", --prompt, "{prompt}",
+      --output, "{output}", --dtype, float16, --height, "480", --width, "720",
+      --num-frames, "49", --fps, "8", --steps, "50", --guidance-scale, "6",
+      --seed, "{seed}", --enable-tf32]
+
+  - id: cogvideox1_5_5b
+    condition_kinds: [caption]
+    required_paths:
+      - "{models_root}/CogVideo/inference/cli_demo.py"
+      - "{models_root}/CogVideoX1.5-5B/model_index.json"
+    command: [conda, run, -n, cogvideox15, python,
+      "{models_root}/CogVideo/inference/cli_demo.py", --prompt, "{prompt}",
+      --model_path, "{models_root}/CogVideoX1.5-5B", --generate_type, t2v,
+      --output_path, "{output}", --num_frames, "49", --fps, "8",
+      --seed, "{seed}", --dtype, bfloat16]
+
+  - id: wan2_2_5b
+    condition_kinds: [caption]
+    required_paths:
+      - "{models_root}/Wan2.2/generate.py"
+      - "{models_root}/Wan2.2/Wan2.2-TI2V-5B"
+    command: [conda, run, -n, wan22, python, "{models_root}/Wan2.2/generate.py",
+      --task, ti2v-5B, --size, "1280*704", --frame_num, "65",
+      --ckpt_dir, "{models_root}/Wan2.2/Wan2.2-TI2V-5B",
+      --offload_model, "True", --convert_model_dtype, --t5_cpu,
+      --base_seed, "{seed}", --prompt, "{prompt}", --save_file, "{output}"]
+
+  - id: contentv_8b
+    condition_kinds: [caption]
+    required_paths:
+      - "{models_root}/ContentV/contentv_pipeline.py"
+      - "{models_root}/ContentV-8B/model_index.json"
+    command: [conda, run, -n, contentv8b, python,
+      "{repo_root}/scripts/adapters/contentv_generate.py", --repo, "{models_root}/ContentV",
+      --model-id, "{models_root}/ContentV-8B", --prompt, "{prompt}",
+      --output, "{output}", --seed, "{seed}", --fps, "24", --num-frames, "125"]
+
+  - id: hunyuanvideo_1_5
+    condition_kinds: [caption]
+    required_paths:
+      - "{models_root}/HunyuanVideo-1.5/generate.py"
+      - "{models_root}/HunyuanVideo-1.5/ckpts/config.json"
+    command: [conda, run, -n, hunyuanvideo15, torchrun, --nproc_per_node, "1",
+      "{models_root}/HunyuanVideo-1.5/generate.py", --prompt, "{prompt}",
+      --image_path, none, --resolution, 480p, --aspect_ratio, "16:9",
+      --seed, "{seed}", --rewrite, "false", --cfg_distilled, "false", --sr, "false",
+      --output_path, "{output}", --model_path, "{models_root}/HunyuanVideo-1.5/ckpts"]

@@ -38,6 +38,14 @@ from ms_video_eval.semantic_data import (
     semantic_collate,
 )
 from ms_video_eval.semantic_metrics import multilabel_slot_metrics, search_slot_thresholds
+from ms_video_eval.semantic_tricks import (
+    EEGAugmentationConfig,
+    augment_eeg,
+    classification_prototype_loss,
+    curriculum_multiplier,
+    hierarchical_positive_weights,
+    weighted_positive_contrastive_loss,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -250,6 +258,18 @@ def main() -> None:
     loss_config = config.get("loss", {})
     slot_weights = {key: float(value) for key, value in loss_config.get("slot_weights", {}).items()}
     session_weight = float(loss_config.get("session_consistency", 0.0))
+    contrastive_weight = float(loss_config.get("contrastive", 0.0))
+    prototype_weight = float(loss_config.get("prototype", 0.0))
+    if min(session_weight, contrastive_weight, prototype_weight) < 0:
+        raise ValueError("Loss weights must be non-negative")
+    contrastive_config = config.get("contrastive", {})
+    contrastive_temperature = float(contrastive_config.get("temperature", 0.07))
+    positive_config = contrastive_config.get("positive_weights", {})
+    augmentation = EEGAugmentationConfig.from_mapping(config.get("augmentation"))
+    curriculum = config.get("curriculum", {})
+    accumulation_steps = int(training.get("gradient_accumulation_steps", 1))
+    if accumulation_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be positive")
     thresholds = {key: float(value) for key, value in semantic.get("thresholds", {}).items()}
     threshold_candidates = [float(value) for value in semantic.get("threshold_search", [])]
     output_dir = (
@@ -278,6 +298,13 @@ def main() -> None:
         },
         output_dir / "data_protocol.json",
     )
+    writer = None
+    if bool(config.get("logging", {}).get("tensorboard", True)):
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+        except ImportError as exc:
+            raise ImportError("TensorBoard logging is enabled; install requirements-eeg-semantic.txt") from exc
+        writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
 
     best = float("-inf")
     start_epoch = 1
@@ -305,25 +332,67 @@ def main() -> None:
         model.train()
         train_loss = 0.0
         examples = 0
+        component_sums: dict[str, float] = {}
+        optimizer.zero_grad(set_to_none=True)
         for batch_index, batch in enumerate(train_loader):
-            optimizer.zero_grad(set_to_none=True)
+            eeg = augment_eeg(batch["eeg"].to(device), augmentation)
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
-                output = model(batch["eeg"].to(device))
+                output = model(eeg)
                 slot_loss, components = semantic_slot_loss(
                     output["logits"], batch["targets"], batch["target_masks"], slot_weights
                 )
                 session_loss = cross_session_consistency_loss(
                     output["feature"], batch["video_id"]
                 )
-                loss = slot_loss + session_weight * session_loss
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(training.get("grad_clip", 1.0)))
-            scaler.step(optimizer)
-            scaler.update()
+                positive_weights = hierarchical_positive_weights(
+                    batch["video_id"],
+                    {key: value.to(device) for key, value in batch["targets"].items()},
+                    {key: value.to(device) for key, value in batch["target_masks"].items()},
+                    positive_config,
+                )
+                contrastive_loss = weighted_positive_contrastive_loss(
+                    output["feature"], output["feature"], positive_weights,
+                    temperature=contrastive_temperature,
+                )
+                prototype_loss = classification_prototype_loss(
+                    output["feature"], model.heads, batch["targets"], batch["target_masks"],
+                    loss_config.get("prototype_slot_weights"),
+                )
+                classification_scale = curriculum_multiplier(
+                    epoch, epochs, curriculum, "classification"
+                )
+                alignment_scale = curriculum_multiplier(epoch, epochs, curriculum, "alignment")
+                loss = (
+                    classification_scale * slot_loss
+                    + session_weight * session_loss
+                    + alignment_scale * contrastive_weight * contrastive_loss
+                    + prototype_weight * prototype_loss
+                )
+            scaler.scale(loss / accumulation_steps).backward()
+            should_step = (
+                args.smoke
+                or (batch_index + 1) % accumulation_steps == 0
+                or batch_index + 1 == len(train_loader)
+            )
+            if should_step:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), float(training.get("grad_clip", 1.0))
+                )
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
             size = batch["eeg"].shape[0]
             train_loss += float(loss.detach()) * size
             examples += size
+            batch_components = {
+                **{f"slot_{key}": value for key, value in components.items()},
+                "session_consistency": float(session_loss.detach()),
+                "contrastive": float(contrastive_loss.detach()),
+                "prototype": float(prototype_loss.detach()),
+            }
+            for key, value in batch_components.items():
+                component_sums[key] = component_sums.get(key, 0.0) + value * size
             if args.smoke:
                 break
         scheduler.step()
@@ -336,11 +405,23 @@ def main() -> None:
         record = {
             "epoch": epoch,
             "train_loss": train_loss / max(1, examples),
+            "train_components": {
+                key: value / max(1, examples) for key, value in component_sums.items()
+            },
             "validation": valid,
             "learning_rate": optimizer.param_groups[0]["lr"],
         }
         with history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
+        if writer is not None:
+            writer.add_scalar("loss/train_total", record["train_loss"], epoch)
+            writer.add_scalar("loss/validation", valid["loss"], epoch)
+            writer.add_scalar("metrics/validation_macro_f1", score, epoch)
+            writer.add_scalar("metrics/validation_micro_f1", valid["metrics"]["aggregate"]["micro_f1"], epoch)
+            writer.add_scalar("optimization/learning_rate", record["learning_rate"], epoch)
+            for key, value in record["train_components"].items():
+                writer.add_scalar(f"loss_components/{key}", value, epoch)
+            writer.flush()
         is_best = score > best
         best = max(best, score)
         payload = {
@@ -362,6 +443,8 @@ def main() -> None:
         atomic_torch_save(payload, output_dir / "last.pt")
         if is_best:
             atomic_torch_save(payload, output_dir / "best.pt")
+            atomic_torch_save(payload, output_dir / "best_semantic.pt")
+            atomic_torch_save(payload, output_dir / "best_overall.pt")
         print(
             f"[eeg-semantic] epoch={epoch}/{epochs} train_loss={record['train_loss']:.4f} "
             f"val_macro_f1={score:.4f}",
@@ -369,6 +452,8 @@ def main() -> None:
         )
     if start_epoch > epochs:
         print(f"[eeg-semantic] run already completed {epochs} epochs", flush=True)
+    if writer is not None:
+        writer.close()
     print(f"[eeg-semantic] best checkpoint: {output_dir / 'best.pt'}")
 
 

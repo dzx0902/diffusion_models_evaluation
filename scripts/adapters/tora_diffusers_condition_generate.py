@@ -23,7 +23,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tora-repo", type=Path, required=True)
     parser.add_argument("--model-root", type=Path, required=True)
-    parser.add_argument("--condition", type=Path, required=True)
+    parser.add_argument("--condition", type=Path, default=None)
+    parser.add_argument("--prompt", type=str, default=None)
     parser.add_argument("--conditioning", choices=("native", "injected"), required=True)
     parser.add_argument("--point-path", type=Path, nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -45,13 +46,22 @@ def parse_args() -> argparse.Namespace:
 
 def validate_paths(args: argparse.Namespace) -> Path:
     diffusers_root = args.tora_repo.resolve() / "diffusers-version"
+    conditioning = getattr(args, "conditioning", "injected")
+    prompt = getattr(args, "prompt", None)
     required = [
         diffusers_root / "tora" / "t2v_pipeline.py",
         diffusers_root / "tora" / "traj_utils.py",
         args.model_root.resolve() / "model_index.json",
-        args.condition.resolve(),
         *[path.resolve() for path in args.point_path],
     ]
+    if conditioning == "injected":
+        if args.condition is None:
+            raise ValueError("Injected conditioning requires --condition")
+        required.append(args.condition.resolve())
+    elif not prompt and args.condition is None:
+        raise ValueError("Native conditioning requires --prompt or a caption-bearing --condition")
+    elif args.condition is not None:
+        required.append(args.condition.resolve())
     missing = [path for path in required if not path.exists()]
     if missing:
         raise FileNotFoundError("Missing Tora Diffusers inputs:\n" + "\n".join(map(str, missing)))
@@ -95,7 +105,12 @@ def main() -> None:
     from tora.traj_utils import process_traj
     from torchvision.utils import flow_to_image
 
-    caption, hidden_state, condition_metadata = load_control(args.condition.resolve())
+    if args.condition is not None:
+        caption, hidden_state, condition_metadata = load_control(args.condition.resolve())
+    else:
+        caption = str(args.prompt)
+        hidden_state = None
+        condition_metadata = {}
     dtype = getattr(torch, args.dtype)
     pipeline = ToraPipeline.from_pretrained(args.model_root.resolve(), torch_dtype=dtype)
     pipeline.scheduler = CogVideoXDPMScheduler.from_config(
@@ -106,6 +121,7 @@ def main() -> None:
     elif args.offload == "model":
         pipeline.enable_model_cpu_offload()
     else:
+        assert hidden_state is not None
         pipeline.to("cuda")
     if not args.disable_slicing:
         pipeline.vae.enable_slicing()
@@ -159,8 +175,8 @@ def main() -> None:
         "schema_version": 1,
         "backend": "official_tora_diffusers",
         "conditioning": args.conditioning,
-        "condition": str(args.condition.resolve()),
-        "condition_shape": list(hidden_state.shape),
+        "condition": None if args.condition is None else str(args.condition.resolve()),
+        "condition_shape": None if hidden_state is None else list(hidden_state.shape),
         "caption": caption,
         "condition_metadata": condition_metadata,
         "point_paths": [str(path.resolve()) for path in args.point_path],
