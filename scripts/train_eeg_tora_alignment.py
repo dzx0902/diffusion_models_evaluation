@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--device", default=None)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Resume output-dir/last.pt exactly")
     return parser.parse_args()
 
 
@@ -66,6 +67,31 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def atomic_torch_save(value: Any, path: Path) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(value, temporary)
+    temporary.replace(path)
+
+
+def capture_rng_state(generator: torch.Generator) -> dict[str, Any]:
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+        "loader_generator": generator.get_state(),
+    }
+
+
+def restore_rng_state(state: dict[str, Any], generator: torch.Generator) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
+    if torch.cuda.is_available() and state["cuda"]:
+        torch.cuda.set_rng_state_all(state["cuda"])
+    generator.set_state(state["loader_generator"])
 
 
 class EEGToraAlignmentDataset(EEGSemanticDataset):
@@ -240,6 +266,8 @@ def evaluate(
 
 def main() -> None:
     args = parse_args()
+    if args.smoke and args.resume:
+        raise ValueError("--smoke and --resume cannot be combined")
     config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     method = config["experiment"]["method"]
     if method not in {"direct_tora_text", "tora_pca"}:
@@ -351,10 +379,33 @@ def main() -> None:
         json.dumps(vocabulary.to_json(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
     history_path = output_dir / "history.jsonl"
-    if history_path.exists() and not args.smoke:
+    if history_path.exists() and not args.smoke and not args.resume:
         raise FileExistsError(f"Refusing to overwrite existing run: {history_path}")
+    if args.resume and not (output_dir / "last.pt").is_file():
+        raise FileNotFoundError(f"Cannot resume without {output_dir / 'last.pt'}")
     best = float("inf")
-    for epoch in range(1, epochs + 1):
+    start_epoch = 1
+    if args.resume:
+        checkpoint = torch.load(output_dir / "last.pt", map_location=device, weights_only=False)
+        if checkpoint.get("method") != method:
+            raise ValueError("Resume checkpoint method does not match config")
+        required = {
+            "optimizer_state", "scheduler_state", "scaler_state", "best_loss", "rng_state"
+        }
+        missing = required - set(checkpoint)
+        if missing:
+            raise ValueError(f"Checkpoint predates exact resume support; missing {sorted(missing)}")
+        if checkpoint.get("config") != config:
+            raise ValueError("Resume checkpoint config does not exactly match the requested config")
+        model.load_state_dict(checkpoint["state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+        scaler.load_state_dict(checkpoint["scaler_state"])
+        restore_rng_state(checkpoint["rng_state"], generator)
+        best = float(checkpoint["best_loss"])
+        start_epoch = int(checkpoint["epoch"]) + 1
+        print(f"[eeg-tora] resuming at epoch {start_epoch} with best={best:.6f}", flush=True)
+    for epoch in range(start_epoch, epochs + 1):
         model.train()
         train_sum = 0.0
         examples = 0
@@ -387,6 +438,9 @@ def main() -> None:
         }
         with history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
+        score = float(valid["loss"])
+        is_best = score < best
+        best = min(best, score)
         payload = {
             "schema_version": 1,
             "method": method,
@@ -397,16 +451,22 @@ def main() -> None:
             "target_mean": None if target_mean is None else target_mean.detach().cpu(),
             "validation": valid,
             "config": config,
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "scaler_state": scaler.state_dict(),
+            "best_loss": best,
+            "rng_state": capture_rng_state(generator),
         }
-        torch.save(payload, output_dir / "last.pt")
-        if valid["loss"] < best:
-            best = valid["loss"]
-            torch.save(payload, output_dir / "best.pt")
+        atomic_torch_save(payload, output_dir / "last.pt")
+        if is_best:
+            atomic_torch_save(payload, output_dir / "best.pt")
         print(
             f"[eeg-tora] epoch={epoch}/{epochs} train_loss={record['train_loss']:.4f} "
             f"val_loss={valid['loss']:.4f} val_mse={valid['mse']:.6f}",
             flush=True,
         )
+    if start_epoch > epochs:
+        print(f"[eeg-tora] run already completed {epochs} epochs", flush=True)
     print(f"[eeg-tora] best checkpoint: {output_dir / 'best.pt'}")
 
 

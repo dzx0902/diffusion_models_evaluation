@@ -305,6 +305,24 @@ python scripts/train_eeg_tora_alignment.py \
   --config configs/eeg_semantic/method_c_pca_tora.yaml --device cuda
 ```
 
+正式训练每轮原子写入 `last.pt`，并保存 model、optimizer、scheduler、AMP scaler、
+Python/NumPy/PyTorch/CUDA RNG 及 DataLoader generator 状态。服务中断后使用完全相同
+config 续训：
+
+```bash
+python scripts/train_eeg_semantic.py \
+  --config configs/eeg_semantic/method_a_template.yaml --device cuda --resume
+
+python scripts/train_eeg_semantic.py \
+  --config configs/eeg_semantic/method_b_structured.yaml --device cuda --resume
+
+python scripts/train_eeg_tora_alignment.py \
+  --config configs/eeg_semantic/method_c_pca_tora.yaml --device cuda --resume
+```
+
+不带 `--resume` 时，若正式输出目录已有 `history.jsonl`，训练器会拒绝覆盖。
+旧 checkpoint 没有完整训练状态，不允许伪装成精确续训。
+
 C1 `[226,4096]` 显存占用显著高于 C2；先用 `--smoke` 验证 batch，再根据显存将 C1
 `batch_size` 从 12 调整为 3/6，并使用梯度累积的后续实现保持有效 batch 一致。
 
