@@ -8,3 +8,4 @@ sentencepiece>=0.2
 pytest>=8,<9
 tensorboard>=2.16
 pillow>=10
+opencv-python-headless>=4.8
