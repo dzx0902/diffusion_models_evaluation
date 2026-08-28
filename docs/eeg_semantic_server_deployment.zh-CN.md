@@ -254,6 +254,37 @@ torchrun --standalone --nproc_per_node=1 \
 native、full injection、PCA injection 必须使用相同 prompt、point path、seed、采样配置和 GPU
 数。若 cached full injection 与 native 明显不一致，停止后续 EEG 生成并先修复 adapter。
 
+官方 Diffusers 权重使用 `tora_diffusers_condition_generate.py`。adapter 从 condition
+文件自动读取同一 caption，`native` 走 tokenizer/T5，`injected` 直接传入
+`prompt_embeds`：
+
+```bash
+export TORA_REPO="$PROJECT_ROOT/.ms_video_models/Tora"
+export TORA_MODEL="$PROJECT_ROOT/.ms_video_models/Tora_T2V_diffusers"
+export TORA_TRAJ="$TORA_REPO/sat/trajs/pause.txt"
+
+python scripts/adapters/tora_diffusers_condition_generate.py \
+  --tora-repo "$TORA_REPO" --model-root "$TORA_MODEL" \
+  --condition outputs/tora/text_cache/01-001.pt \
+  --conditioning native --point-path "$TORA_TRAJ" \
+  --output outputs/tora/controls/01-001_native.mp4 \
+  --num-frames 49 --seed 42 --offload model
+
+python scripts/adapters/tora_diffusers_condition_generate.py \
+  --tora-repo "$TORA_REPO" --model-root "$TORA_MODEL" \
+  --condition outputs/tora/text_cache/01-001.pt \
+  --conditioning injected --point-path "$TORA_TRAJ" \
+  --output outputs/tora/controls/01-001_full_injected.mp4 \
+  --num-frames 49 --seed 42 --offload model
+
+python scripts/adapters/tora_diffusers_condition_generate.py \
+  --tora-repo "$TORA_REPO" --model-root "$TORA_MODEL" \
+  --condition outputs/tora/controls/pca512_conditions/01-001_pca512.pt \
+  --conditioning injected --point-path "$TORA_TRAJ" \
+  --output outputs/tora/controls/01-001_pca512_injected.mp4 \
+  --num-frames 49 --seed 42 --offload model
+```
+
 ## 8. 阶段 5：正式语义训练
 
 先运行一个被试、fold 1、seed 42：

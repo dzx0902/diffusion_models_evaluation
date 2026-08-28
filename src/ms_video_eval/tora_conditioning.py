@@ -3,7 +3,7 @@
 The official Alibaba Tora 5B SAT model config uses ``T5Tokenizer`` and
 ``T5EncoderModel`` with ``max_length=226`` and forwards the resulting rank-3
 tensor as ``conditioning['crossattn']``.  The reference embedder does not pass
-the tokenizer attention mask into T5, so compatibility targets retain all 77
+the tokenizer attention mask into T5, so compatibility targets retain all 226
 padded positions.
 """
 
