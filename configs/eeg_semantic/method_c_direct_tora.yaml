@@ -13,16 +13,17 @@ data:
   sessions: [session1, session2, session3]
 
 model:
+  implementation: eeg2caption_compact
   channels: 62
   sample_points: 800
   sampling_rate: 200
-  hidden_dim: 256
-  token_count: 75
-  encoder_layers: 2
+  eeg_scale: 1000000.0
+  temporal_filters: 16
+  spatial_multiplier: 2
+  feature_dim: 128
   decoder_layers: 2
-  heads: 8
-  dropout: 0.15
-  architecture: baseline
+  decoder_heads: 8
+  dropout: 0.35
   condition_slots: 226
   condition_dim: 4096
   target_centering: true
@@ -39,8 +40,12 @@ contrastive:
   temperature: 0.07
   mode: hard_multi_positive
 
+augmentation:
+  noise_std: 0.02
+  time_mask_samples: 20
+
 training:
-  epochs: 80
+  epochs: 100
   batch_size: 12
   workers: 0
   group_sessions: true

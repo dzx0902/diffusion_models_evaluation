@@ -53,7 +53,7 @@ def main() -> None:
         trainer = (
             ROOT / "scripts/train_eeg2caption_ablation.py"
             if job.method in {"coarse_template", "structured_semantic"}
-            else ROOT / "scripts/train_eeg_tora_alignment.py"
+            else ROOT / "scripts/train_compact_tora_alignment.py"
         )
         checkpoint = job.output_dir / "best.pt"
         if args.stage in {"train", "all"}:
@@ -73,16 +73,16 @@ def main() -> None:
                 script = ROOT / "scripts/evaluate_eeg2caption_ablation.py"
                 output = job.output_dir / "test_semantic"
             else:
-                script = ROOT / "scripts/predict_eeg_tora_conditions.py"
+                script = ROOT / "scripts/predict_compact_tora_conditions.py"
                 output = job.output_dir / "test_conditions"
             if args.skip_existing and (output / ("predictions.json" if "semantic" in output.name else "report.json")).is_file():
                 print(f"[eeg-ablation] skip prediction {job.variant}/{job.subject}/{job.fold}/seed{job.seed}")
-                continue
-            run(
-                [sys.executable, str(script), "--checkpoint", str(checkpoint), "--partition", "test",
-                 "--output-dir", str(output), "--device", args.device],
-                args.dry_run,
-            )
+            else:
+                run(
+                    [sys.executable, str(script), "--checkpoint", str(checkpoint), "--partition", "test",
+                     "--output-dir", str(output), "--device", args.device],
+                    args.dry_run,
+                )
         if args.stage in {"generate", "all"}:
             protocol = matrix["protocol"]
             if job.method in {"coarse_template", "structured_semantic"}:

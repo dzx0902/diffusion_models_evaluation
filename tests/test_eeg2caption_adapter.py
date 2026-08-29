@@ -9,6 +9,7 @@ import torch
 
 from src.ms_video_eval.eeg2caption_adapter import (
     CompactStructuredClassifier,
+    CompactToraAlignmentModel,
     load_eeg2caption_fold,
     natural_object_caption,
     predicted_object_sets,
@@ -83,6 +84,19 @@ def test_compact_adapter_preserves_three_session_fusion_shapes() -> None:
     assert torch.allclose(
         output["fused_object_logits"], output["session_object_logits"].mean(dim=1)
     )
+
+
+def test_compact_tora_model_uses_same_session_encoder_and_condition_shape() -> None:
+    model = CompactToraAlignmentModel(
+        num_channels=62, num_objects=6, num_pairs=8,
+        temporal_filters=4, spatial_multiplier=1, feature_dim=16, dropout=0.0,
+        condition_slots=12, condition_dim=32, decoder_layers=1, decoder_heads=4,
+    ).eval()
+    with torch.inference_mode():
+        output = model(torch.randn(2, 3, 62, 128))
+    assert output["features"].shape == (2, 3, 16)
+    assert output["latent"].shape == (2, 12, 32)
+    assert output["fused_object_logits"].shape == (2, 6)
 
 
 def test_predicted_category_controls_cardinality_without_ground_truth() -> None:

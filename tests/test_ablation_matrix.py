@@ -30,6 +30,9 @@ def test_materialized_matrix_is_matched_and_resolves_fold_paths(tmp_path: Path) 
     assert config["data"]["fold"] == "video_6fold_1"
     assert config["data"]["tora_target_index"].endswith("pca/fold1/dim512/index.jsonl")
     assert config["experiment"]["output_dir"].endswith("c2_full/chentianlin/video_6fold_1/seed42")
+    assert config["model"]["implementation"] == "eeg2caption_compact"
+    assert "runs_compact/c2_full" in config["experiment"]["output_dir"]
+    assert config["augmentation"] == {"noise_std": 0.025, "time_mask_samples": 30}
     a_base = next(job for job in jobs if job.variant == "a_base")
     a_config = yaml.safe_load(a_base.config_path.read_text(encoding="utf-8"))
     assert a_config["model"]["implementation"] == "eeg2caption_compact"

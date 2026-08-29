@@ -4,7 +4,7 @@ protocol:
   subjects: [chentianlin]
   folds: [video_6fold_1]
   seeds: [42]
-  run_dir_template: outputs/eeg_semantic/runs/{variant}/{subject}/{fold}/seed{seed}
+  run_dir_template: outputs/eeg_semantic/runs_compact/{variant}/{subject}/{fold}/seed{seed}
   trajectory_source: fixed_gt
   generation_seeds: [0, 1, 2]
   caption_generators: [tora, animatediff, zeroscope, cogvideox2b, cogvideox1_5_5b,
@@ -149,13 +149,8 @@ variants:
              session_consistency: 0.1, prototype: 0.05}
       contrastive: {mode: soft_semantic, temperature: 0.07, semantic_temperature: 0.07}
       augmentation:
-        gaussian_noise_std: 0.01
-        temporal_mask_probability: 0.25
-        temporal_mask_fraction: 0.05
-        channel_dropout_probability: 0.03
-        amplitude_scale_min: 0.9
-        amplitude_scale_max: 1.1
-        temporal_shift_samples: 5
+        noise_std: 0.025
+        time_mask_samples: 30
       curriculum:
         enabled: true
         classification: {start: 2.0, end: 0.5}

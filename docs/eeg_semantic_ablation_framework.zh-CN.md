@@ -26,9 +26,12 @@ python scripts/run_eeg_semantic_ablation.py --stage generate \
   class-balanced object BCE 和 category CE，再通过预测 category 决定 Top-2/Top-3，生成固定主体模板。
 - B：使用完全相同的 `EEG2Caption` Compact backbone、object/category heads 和 session fusion，
   再增加 structured slots、validation-only confidence filtering 与 deterministic verbalizer。
-- C1：EEG → 完整 Tora `[226,4096]` 状态；默认小 batch + 梯度累积。
-- C2：EEG → train-only PCA bottleneck → Tora 状态，支持 128/256/512/1024/2048。
-- C3：train-only nonlinear text autoencoder → frozen bottleneck → EEG alignment → decoder。
+- C1：与 A/B 共用 `EEG2Caption` Compact 三 session backbone，再通过 query cross-attention
+  预测完整 Tora `[226,4096]` 状态；默认小 batch + 梯度累积。
+- C2：共用同一 Compact backbone，预测 train-only PCA bottleneck 后还原 Tora 状态，
+  支持 128/256/512/1024/2048。
+- C3：共用同一 Compact backbone；train-only nonlinear text autoencoder 提供 frozen
+  bottleneck target 和 decoder。
 - hard、multi-positive、weighted multi-positive、soft semantic contrastive。
 - same-video cross-session consistency、辅助语义分类、train-only text prototype。
 - classifier-weight prototype、弱 EEG augmentation、hierarchical curriculum。
@@ -39,6 +42,9 @@ python scripts/run_eeg_semantic_ablation.py --stage generate \
 video-held-out fold：category head 从 6 类扩展到 8 类；01--06 输出 Top-2，07--08 输出
 Top-3。Top-K 的 K 来自 EEG category 预测，禁止读取 test GT cardinality。A/B 新实现写入
 `outputs/eeg_semantic/runs_eeg2caption/`，旧的多标签塌缩结果仅保留为失败审计，不再用于比较。
+C1/C2/C3 的新结果写入 `outputs/eeg_semantic/runs_compact/`；旧 `runs/` 下的 C 结果同样
+不参与新实验。所有方法使用完全相同的视频 fold、三 session 输入、train-only 归一化、
+测试视频集合和训练 seed，差异只保留在预测头、目标空间与显式 ablation trick。
 
 PCA 只在对应 fold 的 train videos 上拟合，并在 metadata 中记录 train ID digest 和
 90%/95%/99% explained-variance 建议。prototype 也只从 train videos 构建。

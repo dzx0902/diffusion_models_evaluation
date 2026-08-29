@@ -17,6 +17,7 @@ from torch import nn
 
 from EEG2Caption.src.common import CompactEEGClassifier, ThreeSessionDataset
 
+from .eeg_conditioner import CrossAttentionBlock
 from .semantic_data import (
     SemanticVocabulary,
     load_semantic_record_map,
@@ -207,6 +208,45 @@ class CompactStructuredClassifier(CompactEEGClassifier):
         output["fused_semantic_logits"] = {
             name: values.mean(dim=1) for name, values in session_logits.items()
         }
+        return output
+
+
+class CompactToraAlignmentModel(CompactEEGClassifier):
+    """The same Compact encoder followed by a Tora-condition query decoder."""
+
+    def __init__(
+        self,
+        *args: Any,
+        condition_slots: int,
+        condition_dim: int,
+        decoder_layers: int = 2,
+        decoder_heads: int = 8,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        feature_dim = int(kwargs.get("feature_dim", 128))
+        if condition_slots < 1 or condition_dim < 1:
+            raise ValueError("Condition shape must be positive")
+        if feature_dim % decoder_heads:
+            raise ValueError("feature_dim must be divisible by decoder_heads")
+        self.condition_slots = int(condition_slots)
+        self.condition_dim = int(condition_dim)
+        self.queries = nn.Parameter(torch.randn(condition_slots, feature_dim) * 0.02)
+        self.condition_decoder = nn.ModuleList(
+            CrossAttentionBlock(feature_dim, decoder_heads, float(kwargs.get("dropout", 0.35)))
+            for _ in range(decoder_layers)
+        )
+        self.condition_head = nn.Sequential(
+            nn.LayerNorm(feature_dim), nn.Linear(feature_dim, condition_dim)
+        )
+
+    def forward(self, eeg: torch.Tensor) -> dict[str, Any]:
+        output = super().forward(eeg)
+        context = output["features"]
+        queries = self.queries.unsqueeze(0).expand(eeg.shape[0], -1, -1)
+        for block in self.condition_decoder:
+            queries = block(queries, context)
+        output["latent"] = self.condition_head(queries)
         return output
 
 
