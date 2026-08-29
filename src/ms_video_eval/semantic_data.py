@@ -7,7 +7,7 @@ import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 import numpy as np
 import torch
@@ -147,6 +147,7 @@ class EEGSemanticDataset(Dataset):
         vocabulary: SemanticVocabulary,
         project_root: Path,
         sample_points: int = 800,
+        eeg_array_cache: MutableMapping[Path, np.ndarray] | None = None,
     ) -> None:
         self.rows = list(rows)
         self.semantic_records = dict(semantic_records)
@@ -155,10 +156,17 @@ class EEGSemanticDataset(Dataset):
         if sample_points < 1:
             raise ValueError("sample_points must be positive")
         self.sample_points = int(sample_points)
-        self.npz_cache: dict[Path, Any] = {}
+        # Caching the NpzFile handle is not enough: indexing a compressed
+        # member inflates the complete EEG array on every __getitem__ call.
+        # Cache the inflated array itself and allow train/validation sharing.
+        self.eeg_array_cache = eeg_array_cache if eeg_array_cache is not None else {}
         missing = {row["video_id"] for row in self.rows} - set(self.semantic_records)
         if missing:
             raise KeyError(f"Semantic labels missing video IDs: {sorted(missing)[:5]}")
+        # Preload before DataLoader workers start. Forked workers can then share
+        # these read-only pages instead of each inflating the archives.
+        for path in sorted({self._resolve_path(row["npz_path"]) for row in self.rows}):
+            self._eeg_array(path)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -167,18 +175,21 @@ class EEGSemanticDataset(Dataset):
         path = Path(value)
         return path if path.is_absolute() else self.project_root / path
 
-    def _npz(self, path: Path) -> Any:
-        if path not in self.npz_cache:
-            self.npz_cache[path] = np.load(path, allow_pickle=False)
-        return self.npz_cache[path]
+    def _eeg_array(self, path: Path) -> np.ndarray:
+        if path not in self.eeg_array_cache:
+            with np.load(path, allow_pickle=False) as package:
+                if "eeg" not in package:
+                    raise KeyError(f"Missing 'eeg' array in {path}")
+                self.eeg_array_cache[path] = np.asarray(package["eeg"])
+        return self.eeg_array_cache[path]
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         row = self.rows[index]
         path = self._resolve_path(row["npz_path"])
-        package = self._npz(path)
+        eeg_array = self._eeg_array(path)
         length = int(row["length_samples"])
         signal = np.asarray(
-            package["eeg"][int(row["trial_index"]), :, : min(length, self.sample_points)],
+            eeg_array[int(row["trial_index"]), :, : min(length, self.sample_points)],
             dtype=np.float32,
         )
         if signal.shape[-1] < self.sample_points:

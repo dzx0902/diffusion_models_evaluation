@@ -86,6 +86,12 @@ def atomic_torch_save(value: Any, path: Path) -> None:
     temporary.replace(path)
 
 
+def atomic_json(value: Any, path: Path) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
 def capture_rng_state(generator: torch.Generator) -> dict[str, Any]:
     return {
         "python": random.getstate(),
@@ -424,14 +430,17 @@ def main() -> None:
         min_tokens=slots,
         max_tokens=slots,
     )
+    eeg_array_cache: dict[Path, np.ndarray] = {}
     train_dataset = EEGToraAlignmentDataset(
         train_rows, record_map, vocabulary, ROOT, encoder_config.sample_points,
+        eeg_array_cache=eeg_array_cache,
         target_index=target_index,
         target_kind=method,
         expected_shape=(slots, dimension),
     )
     validation_dataset = EEGToraAlignmentDataset(
         validation_rows, record_map, vocabulary, ROOT, encoder_config.sample_points,
+        eeg_array_cache=eeg_array_cache,
         target_index=target_index,
         target_kind=method,
         expected_shape=(slots, dimension),
@@ -641,6 +650,10 @@ def main() -> None:
         print(f"[eeg-tora] run already completed {epochs} epochs", flush=True)
     if writer is not None:
         writer.close()
+    atomic_json(
+        {"schema_version": 1, "completed_epochs": epochs, "checkpoint": "last.pt"},
+        output_dir / "completed.json",
+    )
     print(f"[eeg-tora] best checkpoint: {output_dir / 'best.pt'}")
 
 

@@ -57,7 +57,8 @@ def main() -> None:
         )
         checkpoint = job.output_dir / "best.pt"
         if args.stage in {"train", "all"}:
-            if args.skip_existing and checkpoint.is_file():
+            completion = job.output_dir / "completed.json"
+            if args.skip_existing and completion.is_file():
                 print(f"[eeg-ablation] skip trained {job.variant}/{job.subject}/{job.fold}/seed{job.seed}")
             else:
                 command = [sys.executable, str(trainer), "--config", str(job.config_path), "--device", args.device]

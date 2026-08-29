@@ -5,12 +5,57 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.ms_video_eval.semantic_data import SemanticVocabulary, load_video_partitions
+import numpy as np
+
+from src.ms_video_eval.semantic_data import (
+    EEGSemanticDataset,
+    SemanticVocabulary,
+    load_video_partitions,
+)
 from src.ms_video_eval.semantic_metrics import search_slot_thresholds
 from src.ms_video_eval.semantic_schema import semantic_record_from_source
 
 
 class SemanticDataTest(unittest.TestCase):
+    def test_dataset_shares_inflated_eeg_array_between_partitions(self) -> None:
+        record = semantic_record_from_source(
+            {
+                "video_id": "01_001",
+                "caption": "A person kicks a ball.",
+                "caption_relations": ["person kicks ball"],
+            },
+            "fixture",
+        )
+        vocabulary = SemanticVocabulary.fit([record], ["subject"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "session.npz"
+            np.savez_compressed(
+                archive,
+                eeg=np.arange(2 * 2 * 8, dtype=np.float32).reshape(2, 2, 8),
+            )
+            shared: dict[Path, np.ndarray] = {}
+            first = EEGSemanticDataset(
+                [{
+                    "video_id": "01-001", "session": "session1",
+                    "npz_path": str(archive), "trial_index": "0", "length_samples": "8",
+                }],
+                {"01-001": record}, vocabulary, root, sample_points=8,
+                eeg_array_cache=shared,
+            )
+            cached = shared[archive]
+            second = EEGSemanticDataset(
+                [{
+                    "video_id": "01-001", "session": "session2",
+                    "npz_path": str(archive), "trial_index": "1", "length_samples": "8",
+                }],
+                {"01-001": record}, vocabulary, root, sample_points=8,
+                eeg_array_cache=shared,
+            )
+            self.assertIs(shared[archive], cached)
+            self.assertEqual(tuple(first[0]["eeg"].shape), (2, 8))
+            self.assertEqual(tuple(second[0]["eeg"].shape), (2, 8))
+
     def test_threshold_search_uses_validation_f1(self) -> None:
         import torch
 

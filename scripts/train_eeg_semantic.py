@@ -211,9 +211,14 @@ def main() -> None:
         train_records, slots, semantic.get("min_frequency", {})
     )
     sample_points = int(config["model"].get("sample_points", 800))
-    train_dataset = EEGSemanticDataset(train_rows, record_map, vocabulary, ROOT, sample_points)
+    eeg_array_cache: dict[Path, np.ndarray] = {}
+    train_dataset = EEGSemanticDataset(
+        train_rows, record_map, vocabulary, ROOT, sample_points,
+        eeg_array_cache=eeg_array_cache,
+    )
     validation_dataset = EEGSemanticDataset(
-        validation_rows, record_map, vocabulary, ROOT, sample_points
+        validation_rows, record_map, vocabulary, ROOT, sample_points,
+        eeg_array_cache=eeg_array_cache,
     )
 
     training = config["training"]
@@ -454,6 +459,10 @@ def main() -> None:
         print(f"[eeg-semantic] run already completed {epochs} epochs", flush=True)
     if writer is not None:
         writer.close()
+    atomic_json(
+        {"schema_version": 1, "completed_epochs": epochs, "checkpoint": "last.pt"},
+        output_dir / "completed.json",
+    )
     print(f"[eeg-semantic] best checkpoint: {output_dir / 'best.pt'}")
 
 
