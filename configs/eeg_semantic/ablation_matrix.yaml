@@ -40,6 +40,25 @@ variants:
       loss: {structured_weight: 0.75, consistency_weight: 0.1}
       augmentation: {noise_std: 0.025, time_mask_samples: 30}
 
+  # Temporal-window pilot on the original EEG2Caption scope (01--06 only).
+  - id: a_4s_first6
+    base_config: configs/eeg_semantic/method_a_temporal_first6.yaml
+    run_dir_template: outputs/eeg_semantic/runs_eeg2caption_temporal/{variant}/{subject}/{fold}/seed{seed}
+    overrides:
+      model: {segment_samples: 800}
+
+  - id: a_2s2_first6
+    base_config: configs/eeg_semantic/method_a_temporal_first6.yaml
+    run_dir_template: outputs/eeg_semantic/runs_eeg2caption_temporal/{variant}/{subject}/{fold}/seed{seed}
+    overrides:
+      model: {segment_samples: 400}
+
+  - id: a_1s4_first6
+    base_config: configs/eeg_semantic/method_a_temporal_first6.yaml
+    run_dir_template: outputs/eeg_semantic/runs_eeg2caption_temporal/{variant}/{subject}/{fold}/seed{seed}
+    overrides:
+      model: {segment_samples: 200}
+
   - id: c1_mse
     base_config: configs/eeg_semantic/method_c_direct_tora.yaml
     overrides:

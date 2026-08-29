@@ -46,6 +46,12 @@ C1/C2/C3 的新结果写入 `outputs/eeg_semantic/runs_compact/`；旧 `runs/` �
 不参与新实验。所有方法使用完全相同的视频 fold、三 session 输入、train-only 归一化、
 测试视频集合和训练 seed，差异只保留在预测头、目标空间与显式 ablation trick。
 
+时间分段 pilot 另行限定为原始 EEG2Caption 的 01--06 共 468 个双实体视频，并保持既有
+video-held-out fold 后再过滤。`a_4s_first6`、`a_2s2_first6`、`a_1s4_first6` 分别把
+每个 session 划成 1、2、4 个不重叠窗口，同一 Compact 分类器共享参数；segment logits
+先在 session 内平均，再跨三个 session 平均。所有 segment 始终归属于原视频，primary
+metric 是 78 个 test videos 上的 6-way category accuracy，禁止将 segment 计作独立样本。
+
 PCA 只在对应 fold 的 train videos 上拟合，并在 metadata 中记录 train ID digest 和
 90%/95%/99% explained-variance 建议。prototype 也只从 train videos 构建。
 

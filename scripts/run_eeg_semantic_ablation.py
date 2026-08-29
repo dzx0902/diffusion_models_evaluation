@@ -50,11 +50,12 @@ def main() -> None:
         print(f"[eeg-ablation] materialized {len(jobs)} jobs under {generated}")
         return
     for job in jobs:
-        trainer = (
-            ROOT / "scripts/train_eeg2caption_ablation.py"
-            if job.method in {"coarse_template", "structured_semantic"}
-            else ROOT / "scripts/train_compact_tora_alignment.py"
-        )
+        if job.method in {"coarse_template", "structured_semantic"}:
+            trainer = ROOT / "scripts/train_eeg2caption_ablation.py"
+        elif job.method == "temporal_category":
+            trainer = ROOT / "scripts/train_eeg2caption_temporal.py"
+        else:
+            trainer = ROOT / "scripts/train_compact_tora_alignment.py"
         checkpoint = job.output_dir / "best.pt"
         if args.stage in {"train", "all"}:
             completion = job.output_dir / "completed.json"
@@ -72,6 +73,9 @@ def main() -> None:
             if job.method in {"coarse_template", "structured_semantic"}:
                 script = ROOT / "scripts/evaluate_eeg2caption_ablation.py"
                 output = job.output_dir / "test_semantic"
+            elif job.method == "temporal_category":
+                script = ROOT / "scripts/evaluate_eeg2caption_temporal.py"
+                output = job.output_dir / "test_semantic"
             else:
                 script = ROOT / "scripts/predict_compact_tora_conditions.py"
                 output = job.output_dir / "test_conditions"
@@ -85,7 +89,7 @@ def main() -> None:
                 )
         if args.stage in {"generate", "all"}:
             protocol = matrix["protocol"]
-            if job.method in {"coarse_template", "structured_semantic"}:
+            if job.method in {"coarse_template", "structured_semantic", "temporal_category"}:
                 condition_input = job.output_dir / "test_semantic/predictions.json"
                 condition_kind = "caption"
                 generators = list(protocol["caption_generators"])

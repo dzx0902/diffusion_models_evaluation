@@ -10,9 +10,11 @@ import torch
 from src.ms_video_eval.eeg2caption_adapter import (
     CompactStructuredClassifier,
     CompactToraAlignmentModel,
+    TemporalSegmentCompactClassifier,
     load_eeg2caption_fold,
     natural_object_caption,
     predicted_object_sets,
+    subset_eeg2caption_fold,
 )
 from src.ms_video_eval.semantic_schema import semantic_record_from_source
 
@@ -97,6 +99,62 @@ def test_compact_tora_model_uses_same_session_encoder_and_condition_shape() -> N
     assert output["features"].shape == (2, 3, 16)
     assert output["latent"].shape == (2, 12, 32)
     assert output["fused_object_logits"].shape == (2, 6)
+
+
+def test_temporal_compact_model_fuses_segments_then_sessions() -> None:
+    model = TemporalSegmentCompactClassifier(
+        segment_samples=32, total_samples=128,
+        num_channels=62, num_objects=6, num_pairs=6,
+        temporal_filters=4, spatial_multiplier=1, feature_dim=16, dropout=0.0,
+    ).eval()
+    with torch.inference_mode():
+        output = model(torch.randn(2, 3, 62, 128))
+    assert output["segment_features"].shape == (2, 3, 4, 16)
+    assert output["segment_category_logits"].shape == (2, 3, 4, 6)
+    assert output["session_category_logits"].shape == (2, 3, 6)
+    assert output["fused_category_logits"].shape == (2, 6)
+    assert torch.allclose(
+        output["fused_category_logits"],
+        output["segment_category_logits"].mean(dim=(1, 2)),
+    )
+
+
+def test_first_six_subset_preserves_video_partitions_and_remaps_categories(tmp_path: Path) -> None:
+    ids = ("01-001", "02-001", "07-001")
+    trial_rows = []
+    for session_index, session in enumerate(("session1", "session2", "session3")):
+        path = tmp_path / f"subset_{session}.npz"
+        np.savez_compressed(path, eeg=np.zeros((3, 62, 800), dtype=np.float32))
+        for index, video_id in enumerate(ids):
+            trial_rows.append({
+                "video_id": video_id, "session": session, "npz_path": str(path),
+                "trial_index": index, "length_samples": 800,
+            })
+    trials = tmp_path / "subset_trials.csv"
+    with trials.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=trial_rows[0])
+        writer.writeheader()
+        writer.writerows(trial_rows)
+    records = [
+        semantic_record_from_source({
+            "video_id": video_id, "caption": "A video.", "caption_relations": [],
+        }, "fixture") for video_id in ids
+    ]
+    labels = tmp_path / "subset_labels.jsonl"
+    labels.write_text("".join(json.dumps(record.to_json()) + "\n" for record in records))
+    plan = tmp_path / "subset_split.json"
+    plan.write_text(json.dumps({"experiments": [{
+        "name": "fold1", "train_video_ids": [ids[0]],
+        "validation_video_ids": [ids[1]], "test_video_ids": [ids[2]],
+    }]}))
+    fold = load_eeg2caption_fold(
+        tmp_path, trials, labels, plan, "fold1",
+        ("session1", "session2", "session3"), 800,
+    )
+    subset = subset_eeg2caption_fold(fold, ("01", "02", "03", "04", "05", "06"))
+    assert subset.video_ids == ("01-001", "02-001")
+    assert subset.category_targets.tolist() == [0, 1]
+    assert subset.split_indices == {"train": [0], "validation": [1], "test": []}
 
 
 def test_predicted_category_controls_cardinality_without_ground_truth() -> None:

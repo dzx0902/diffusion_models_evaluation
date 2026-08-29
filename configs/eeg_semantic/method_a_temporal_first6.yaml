@@ -1,0 +1,44 @@
+experiment:
+  name: method_a_temporal_first6
+  method: temporal_category
+  seed: 42
+  output_dir: outputs/eeg_semantic/runs_eeg2caption_temporal/a_4s_first6/chentianlin/video_6fold_1/seed42
+
+data:
+  trials: data/manifests/chentianlin/eeg_trials.csv
+  semantic_labels: outputs/semantic_labels/eeg_semantic_labels_v1.jsonl
+  split_plan: outputs/eeg_wan/splits/chentianlin_video_6fold_plan.json
+  fold: video_6fold_1
+  sessions: [session1, session2, session3]
+  allowed_categories: ['01', '02', '03', '04', '05', '06']
+
+model:
+  implementation: eeg2caption_compact_temporal
+  channels: 62
+  sample_points: 800
+  segment_samples: 800
+  sampling_rate: 200
+  eeg_scale: 1000000.0
+  temporal_filters: 16
+  spatial_multiplier: 2
+  feature_dim: 128
+  dropout: 0.35
+
+loss:
+  fused_category_weight: 1.0
+  segment_category_weight: 0.5
+  object_auxiliary_weight: 0.2
+  consistency_weight: 0.1
+
+augmentation:
+  noise_std: 0.02
+  time_mask_samples: 20
+
+training:
+  epochs: 100
+  batch_size: 32
+  workers: 0
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  grad_clip: 5.0
+  amp: true

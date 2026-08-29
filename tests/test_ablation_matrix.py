@@ -37,3 +37,12 @@ def test_materialized_matrix_is_matched_and_resolves_fold_paths(tmp_path: Path) 
     a_config = yaml.safe_load(a_base.config_path.read_text(encoding="utf-8"))
     assert a_config["model"]["implementation"] == "eeg2caption_compact"
     assert "runs_eeg2caption/a_base" in a_config["experiment"]["output_dir"]
+    temporal = {
+        job.variant: yaml.safe_load(job.config_path.read_text(encoding="utf-8"))
+        for job in jobs if job.variant in {"a_4s_first6", "a_2s2_first6", "a_1s4_first6"}
+    }
+    assert {key: value["model"]["segment_samples"] for key, value in temporal.items()} == {
+        "a_4s_first6": 800, "a_2s2_first6": 400, "a_1s4_first6": 200,
+    }
+    assert all(value["experiment"]["method"] == "temporal_category" for value in temporal.values())
+    assert all(value["data"]["allowed_categories"] == ["01", "02", "03", "04", "05", "06"] for value in temporal.values())

@@ -250,6 +250,100 @@ class CompactToraAlignmentModel(CompactEEGClassifier):
         return output
 
 
+class TemporalSegmentCompactClassifier(nn.Module):
+    """Apply one shared Compact classifier to fixed windows of each session."""
+
+    def __init__(
+        self,
+        *,
+        segment_samples: int,
+        total_samples: int = 800,
+        **classifier_kwargs: Any,
+    ) -> None:
+        super().__init__()
+        if segment_samples < 1 or total_samples % segment_samples:
+            raise ValueError("segment_samples must divide total_samples exactly")
+        self.segment_samples = int(segment_samples)
+        self.total_samples = int(total_samples)
+        self.segment_count = self.total_samples // self.segment_samples
+        self.classifier = CompactEEGClassifier(**classifier_kwargs)
+
+    def forward(self, eeg: torch.Tensor) -> dict[str, torch.Tensor]:
+        if eeg.ndim != 4 or eeg.shape[-1] != self.total_samples:
+            raise ValueError(
+                f"Expected [batch,session,channel,{self.total_samples}], got {tuple(eeg.shape)}"
+            )
+        batch, sessions, channels, _ = eeg.shape
+        segments = eeg.reshape(
+            batch, sessions, channels, self.segment_count, self.segment_samples
+        ).permute(0, 1, 3, 2, 4)
+        flat = segments.reshape(
+            batch * sessions * self.segment_count, 1, channels, self.segment_samples
+        )
+        encoded = self.classifier(flat)
+        features = encoded["features"].reshape(
+            batch, sessions, self.segment_count, -1
+        )
+        object_logits = encoded["fused_object_logits"].reshape(
+            batch, sessions, self.segment_count, -1
+        )
+        category_logits = encoded["fused_pair_logits"].reshape(
+            batch, sessions, self.segment_count, -1
+        )
+        return {
+            "segment_features": features,
+            "segment_object_logits": object_logits,
+            "segment_category_logits": category_logits,
+            "session_object_logits": object_logits.mean(dim=2),
+            "session_category_logits": category_logits.mean(dim=2),
+            "fused_object_logits": object_logits.mean(dim=(1, 2)),
+            "fused_category_logits": category_logits.mean(dim=(1, 2)),
+        }
+
+
+def subset_eeg2caption_fold(
+    fold: EEG2CaptionFold,
+    allowed_categories: Sequence[str],
+) -> EEG2CaptionFold:
+    """Filter a fold by video category while preserving video-level partitions."""
+
+    categories = tuple(allowed_categories)
+    if not categories or len(set(categories)) != len(categories):
+        raise ValueError("allowed_categories must be non-empty and unique")
+    unknown = set(categories) - set(CATEGORY_NAMES)
+    if unknown:
+        raise ValueError(f"Unknown categories: {sorted(unknown)}")
+    old_lookup = {name: index for index, name in enumerate(CATEGORY_NAMES)}
+    selected = [
+        index for index, video_id in enumerate(fold.video_ids)
+        if video_id.split("-", 1)[0] in set(categories)
+    ]
+    old_to_new = {old: new for new, old in enumerate(selected)}
+    category_to_local = {old_lookup[name]: index for index, name in enumerate(categories)}
+    category_targets = torch.tensor(
+        [category_to_local[int(fold.category_targets[index])] for index in selected],
+        dtype=torch.long,
+    )
+    video_ids = tuple(fold.video_ids[index] for index in selected)
+    return EEG2CaptionFold(
+        eeg=fold.eeg[selected],
+        video_ids=video_ids,
+        object_labels=fold.object_labels[selected],
+        category_targets=category_targets,
+        cardinalities=fold.cardinalities[selected],
+        split_indices={
+            partition: [old_to_new[index] for index in indices if index in old_to_new]
+            for partition, indices in fold.split_indices.items()
+        },
+        records={video_id: fold.records[video_id] for video_id in video_ids},
+        data_metadata={
+            **fold.data_metadata,
+            "allowed_categories": list(categories),
+            "filtered_video_count": len(video_ids),
+        },
+    )
+
+
 def build_semantic_targets(
     fold: EEG2CaptionFold,
     vocabulary: SemanticVocabulary,
