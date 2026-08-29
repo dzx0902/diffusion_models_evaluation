@@ -18,48 +18,27 @@ protocol:
 variants:
   - id: a_base
     base_config: configs/eeg_semantic/method_a_template.yaml
-    overrides:
-      loss: {contrastive: 0.0, session_consistency: 0.0, prototype: 0.0}
-      training: {gradient_accumulation_steps: 1}
+    run_dir_template: outputs/eeg_semantic/runs_eeg2caption/{variant}/{subject}/{fold}/seed{seed}
+    overrides: {}
 
   - id: a_enhanced
     base_config: configs/eeg_semantic/method_a_template.yaml
+    run_dir_template: outputs/eeg_semantic/runs_eeg2caption/{variant}/{subject}/{fold}/seed{seed}
     overrides:
-      loss: {contrastive: 0.2, session_consistency: 0.1, prototype: 0.05}
-      contrastive:
-        temperature: 0.07
-        positive_weights: {same_video: 1.0, same_full_semantics: 0.8,
-                           same_action_object: 0.6, same_action: 0.4}
-      augmentation:
-        gaussian_noise_std: 0.01
-        temporal_mask_probability: 0.25
-        temporal_mask_fraction: 0.05
-        channel_dropout_probability: 0.03
-        amplitude_scale_min: 0.9
-        amplitude_scale_max: 1.1
-        temporal_shift_samples: 5
+      loss: {consistency_weight: 0.1}
+      augmentation: {noise_std: 0.025, time_mask_samples: 30}
 
   - id: b_base
     base_config: configs/eeg_semantic/method_b_structured.yaml
-    overrides:
-      loss: {contrastive: 0.0, session_consistency: 0.0, prototype: 0.0}
+    run_dir_template: outputs/eeg_semantic/runs_eeg2caption/{variant}/{subject}/{fold}/seed{seed}
+    overrides: {}
 
   - id: b_enhanced
     base_config: configs/eeg_semantic/method_b_structured.yaml
+    run_dir_template: outputs/eeg_semantic/runs_eeg2caption/{variant}/{subject}/{fold}/seed{seed}
     overrides:
-      loss: {contrastive: 0.2, session_consistency: 0.1, prototype: 0.05}
-      contrastive:
-        temperature: 0.07
-        positive_weights: {same_video: 1.0, same_full_semantics: 0.8,
-                           same_action_object: 0.6, same_action: 0.4}
-      augmentation:
-        gaussian_noise_std: 0.01
-        temporal_mask_probability: 0.25
-        temporal_mask_fraction: 0.05
-        channel_dropout_probability: 0.03
-        amplitude_scale_min: 0.9
-        amplitude_scale_max: 1.1
-        temporal_shift_samples: 5
+      loss: {structured_weight: 0.75, consistency_weight: 0.1}
+      augmentation: {noise_std: 0.025, time_mask_samples: 30}
 
   - id: c1_mse
     base_config: configs/eeg_semantic/method_c_direct_tora.yaml

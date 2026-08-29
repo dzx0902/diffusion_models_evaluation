@@ -72,7 +72,8 @@ def materialize_jobs(matrix_path: Path, root: Path, output_root: Path) -> tuple[
                         "seed": int(seed),
                     }
                     config = deep_merge(base, interpolate(variant.get("overrides", {}), variables))
-                    run_dir = Path(str(protocol["run_dir_template"]).format_map(variables))
+                    run_template = variant.get("run_dir_template", protocol["run_dir_template"])
+                    run_dir = Path(str(run_template).format_map(variables))
                     config["experiment"].update(
                         name=f"{variant['id']}_{subject}_{fold}_seed{seed}",
                         seed=int(seed),

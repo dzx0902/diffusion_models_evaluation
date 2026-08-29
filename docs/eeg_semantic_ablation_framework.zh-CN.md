@@ -18,12 +18,14 @@ python scripts/run_eeg_semantic_ablation.py --stage generate \
 ```
 
 可以用 `--variants a_base b_base c2_full` 选择部分实验。若发现 `last.pt`，训练入口会自动使用
-精确续训；若发现 `best.pt` 且使用 `--skip-existing`，则跳过已完成训练。
+精确续训；只有发现训练结束后原子写入的 `completed.json` 且使用 `--skip-existing`，才跳过训练。
 
 ## 2. 已实现方法和 trick
 
-- A：coarse multi-head classification → confidence filtering → deterministic template。
-- B：structured slots → confidence filtering → deterministic verbalizer。
+- A：直接复用学长 `EEG2Caption` 的 Compact EEGNet、三 session 独立编码、logits 融合、
+  class-balanced object BCE 和 category CE，再通过预测 category 决定 Top-2/Top-3，生成固定主体模板。
+- B：使用完全相同的 `EEG2Caption` Compact backbone、object/category heads 和 session fusion，
+  再增加 structured slots、validation-only confidence filtering 与 deterministic verbalizer。
 - C1：EEG → 完整 Tora `[226,4096]` 状态；默认小 batch + 梯度累积。
 - C2：EEG → train-only PCA bottleneck → Tora 状态，支持 128/256/512/1024/2048。
 - C3：train-only nonlinear text autoencoder → frozen bottleneck → EEG alignment → decoder。
@@ -32,6 +34,11 @@ python scripts/run_eeg_semantic_ablation.py --stage generate \
 - classifier-weight prototype、弱 EEG augmentation、hierarchical curriculum。
 - 离线 deterministic paraphrase、caption semantic centroid。
 - TensorBoard 和 JSONL 记录、best semantic、best overall、last checkpoint、精确续训。
+
+原始 `EEG2Caption` 只覆盖 01--06 的 468 个双主体视频。本适配保持现有 624 视频和
+video-held-out fold：category head 从 6 类扩展到 8 类；01--06 输出 Top-2，07--08 输出
+Top-3。Top-K 的 K 来自 EEG category 预测，禁止读取 test GT cardinality。A/B 新实现写入
+`outputs/eeg_semantic/runs_eeg2caption/`，旧的多标签塌缩结果仅保留为失败审计，不再用于比较。
 
 PCA 只在对应 fold 的 train videos 上拟合，并在 metadata 中记录 train ID digest 和
 90%/95%/99% explained-variance 建议。prototype 也只从 train videos 构建。

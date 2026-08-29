@@ -51,7 +51,7 @@ def main() -> None:
         return
     for job in jobs:
         trainer = (
-            ROOT / "scripts/train_eeg_semantic.py"
+            ROOT / "scripts/train_eeg2caption_ablation.py"
             if job.method in {"coarse_template", "structured_semantic"}
             else ROOT / "scripts/train_eeg_tora_alignment.py"
         )
@@ -70,7 +70,7 @@ def main() -> None:
             if not args.dry_run and not checkpoint.is_file():
                 raise FileNotFoundError(f"Missing trained checkpoint: {checkpoint}")
             if job.method in {"coarse_template", "structured_semantic"}:
-                script = ROOT / "scripts/evaluate_eeg_semantic.py"
+                script = ROOT / "scripts/evaluate_eeg2caption_ablation.py"
                 output = job.output_dir / "test_semantic"
             else:
                 script = ROOT / "scripts/predict_eeg_tora_conditions.py"

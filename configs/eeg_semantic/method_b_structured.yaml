@@ -1,8 +1,8 @@
 experiment:
-  name: method_b_structured_chentianlin_fold1_seed42
+  name: method_b_eeg2caption_structured
   method: structured_semantic
   seed: 42
-  output_dir: outputs/eeg_semantic/method_b_structured/chentianlin/fold1/seed42
+  output_dir: outputs/eeg_semantic/runs_eeg2caption/b_base/chentianlin/video_6fold_1/seed42
 
 data:
   trials: data/manifests/chentianlin/eeg_trials.csv
@@ -12,19 +12,18 @@ data:
   sessions: [session1, session2, session3]
 
 model:
+  implementation: eeg2caption_compact
   channels: 62
   sample_points: 800
   sampling_rate: 200
-  hidden_dim: 256
-  token_count: 75
-  encoder_layers: 2
-  heads: 8
-  dropout: 0.15
-  architecture: baseline
+  eeg_scale: 1000000.0
+  temporal_filters: 16
+  spatial_multiplier: 2
+  feature_dim: 128
+  dropout: 0.35
 
 semantic:
   slots: [subject, object, count, coarse_action, fine_action, relation]
-  threshold_search: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
   min_frequency:
     subject: 1
     object: 1
@@ -32,30 +31,23 @@ semantic:
     coarse_action: 1
     fine_action: 3
     relation: 3
-  thresholds:
-    subject: 0.5
-    object: 0.5
-    count: 0.5
-    coarse_action: 0.5
-    fine_action: 0.5
-    relation: 0.5
+  threshold_search: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 
 loss:
-  slot_weights:
-    subject: 1.0
-    object: 1.0
-    count: 0.5
-    coarse_action: 1.0
-    fine_action: 1.0
-    relation: 1.0
-  session_consistency: 0.1
+  category_weight: 0.5
+  fused_weight: 1.0
+  structured_weight: 0.5
+  consistency_weight: 0.05
+
+augmentation:
+  noise_std: 0.02
+  time_mask_samples: 20
 
 training:
-  epochs: 80
-  batch_size: 24
+  epochs: 100
+  batch_size: 32
   workers: 0
-  group_sessions: true
-  learning_rate: 0.0002
+  learning_rate: 0.001
   weight_decay: 0.0001
-  grad_clip: 1.0
+  grad_clip: 5.0
   amp: true
