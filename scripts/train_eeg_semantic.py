@@ -314,7 +314,10 @@ def main() -> None:
     best = float("-inf")
     start_epoch = 1
     if args.resume:
-        checkpoint = torch.load(output_dir / "last.pt", map_location=device, weights_only=False)
+        # Keep RNG snapshots on CPU. Mapping the complete checkpoint to CUDA
+        # turns the saved CPU RNG ByteTensor into a CUDA tensor, which
+        # torch.set_rng_state() rejects during exact resume.
+        checkpoint = torch.load(output_dir / "last.pt", map_location="cpu", weights_only=False)
         if checkpoint.get("method") != method:
             raise ValueError("Resume checkpoint method does not match config")
         required = {
