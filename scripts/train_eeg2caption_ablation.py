@@ -287,7 +287,11 @@ def main() -> None:
         for slot, values in targets.items()
     }
     loss_config = config.get("loss", {})
-    output_dir = resolve(config["experiment"]["output_dir"])
+    output_dir = (
+        ROOT / "outputs/eeg2caption_smoke" / config["experiment"]["name"]
+        if args.smoke
+        else resolve(config["experiment"]["output_dir"])
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     history_path = output_dir / "history.jsonl"
     if history_path.exists() and not args.resume and not args.smoke:
