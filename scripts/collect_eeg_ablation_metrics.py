@@ -5,8 +5,17 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from ms_video_eval.semantic_schema import CORE_ENTITIES_BY_CATEGORY
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,13 +38,28 @@ def semantic_rows(job: dict[str, Any], allow_missing: bool) -> list[dict[str, An
         "subject": job["subject"], "fold": job["fold"], "seed": job["seed"],
         "generation_seed": -1,
     }
-    if job["method"] in {"coarse_template", "structured_semantic"}:
+    if job["method"] in {"coarse_template", "structured_semantic", "temporal_category"}:
         path = output / "test_semantic/predictions.json"
         if not path.is_file():
             if allow_missing:
                 return []
             raise FileNotFoundError(path)
-        records = json.loads(path.read_text(encoding="utf-8"))["video_metric_records"]
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        records = payload.get("video_metric_records")
+        if records is None:
+            records = []
+            for value in payload["video_aggregation_records"]:
+                truth = value["video_id"].split("-", 1)[0]
+                prediction = str(value["predicted_category"]).zfill(2)
+                predicted_objects = set(value.get("predicted_objects", ()))
+                records.append({
+                    "video_id": value["video_id"],
+                    "category_correct": float(prediction == truth),
+                    "object_exact": float(
+                        predicted_objects == set(CORE_ENTITIES_BY_CATEGORY[truth])
+                    ),
+                    "caption_nonempty": float(bool(str(value.get("caption", "")).strip())),
+                })
     else:
         path = output / "test_conditions/video_index.jsonl"
         if not path.is_file():

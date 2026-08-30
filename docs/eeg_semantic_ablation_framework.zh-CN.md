@@ -52,6 +52,29 @@ video-held-out fold 后再过滤。`a_4s_first6`、`a_2s2_first6`、`a_1s4_first
 先在 session 内平均，再跨三个 session 平均。所有 segment 始终归属于原视频，primary
 metric 是 78 个 test videos 上的 6-way category accuracy，禁止将 segment 计作独立样本。
 
+时间窗口模型训练完成后，使用 validation-only 后处理比较 mean logits、mean probability、
+majority vote、无约束 object Top-2、valid-pair object likelihood 和 category–object hybrid。
+hybrid alpha 与最终 decoder 均只在 validation 上选择，然后锁定到 test：
+
+```bash
+for variant in a_4s_first6 a_2s2_first6 a_1s4_first6; do
+  root="outputs/eeg_semantic/runs_eeg2caption_temporal/$variant/chentianlin/video_6fold_1/seed42"
+  python scripts/evaluate_temporal_decoding.py \
+    --checkpoint "$root/best.pt" \
+    --output-dir "$root/temporal_decoding" \
+    --device cuda
+done
+```
+
+规范化结果必须按 `full8_624` 与 `first6_468` 分组，连续 Tora retrieval 也不能与离散
+caption classification 混作同一排名：
+
+```bash
+python scripts/build_standardized_eeg_ablation_results.py \
+  --root outputs/eeg_semantic \
+  --output-dir outputs/eeg_semantic/reports/standardized_fold1_seed42
+```
+
 PCA 只在对应 fold 的 train videos 上拟合，并在 metadata 中记录 train ID digest 和
 90%/95%/99% explained-variance 建议。prototype 也只从 train videos 构建。
 
