@@ -64,8 +64,10 @@ def test_temporal_posthoc_replaces_duplicate_base_row(tmp_path: Path) -> None:
     assert {row["decoder"] for row in rows} == set(decoder_metrics)
     selected = next(row for row in rows if row["decoder"] == "valid_pair_object")
     assert "selected on validation" in selected["selection"]
+    assert selected["primary_analysis"] is True
     mean_logit = next(row for row in rows if row["decoder"] == "mean_logit")
     assert mean_logit["object_macro_ap"] == 0.43
+    assert mean_logit["primary_analysis"] is False
 
 
 def test_long_form_collector_supports_new_video_aggregation_schema(tmp_path: Path) -> None:

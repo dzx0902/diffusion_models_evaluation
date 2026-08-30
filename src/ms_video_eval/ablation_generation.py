@@ -160,7 +160,10 @@ def run_generation_matrix(
                     "generator": generator_id,
                     "condition_kind": kind,
                     "video_id": video_id,
-                    "seed": seed,
+                    # Keep training and stochastic generation seeds distinct in
+                    # every downstream paired-analysis record.
+                    "seed": int(variables.get("training_seed", seed)),
+                    "generation_seed": int(seed),
                     "output": str(output),
                     "command": command,
                     "trajectory": (trajectory_paths or [None])[0],

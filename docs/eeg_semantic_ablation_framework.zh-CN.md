@@ -75,6 +75,27 @@ python scripts/build_standardized_eeg_ablation_results.py \
   --output-dir outputs/eeg_semantic/reports/standardized_fold1_seed42
 ```
 
+正式中文报告分两阶段生成。视频指标缺省时输出 PENDING 版；生成与视频评估完成后传入
+long-form CSV 和各比较组的 generation audit，自动追加同生成器内汇总与配对检验：
+
+```bash
+python scripts/build_formal_eeg_ablation_report.py \
+  --semantic-results outputs/eeg_semantic/reports/standardized_fold1_seed42/results.json \
+  --output-dir outputs/eeg_semantic/reports/formal_fold1_seed42
+
+python scripts/build_formal_eeg_ablation_report.py \
+  --semantic-results outputs/eeg_semantic/reports/standardized_fold1_seed42/results.json \
+  --video-metrics outputs/eeg_semantic/reports/video_metrics_long.csv \
+  --generation-audits outputs/eeg_semantic/reports/audit_full8_caption.json \
+                      outputs/eeg_semantic/reports/audit_first6_temporal.json \
+                      outputs/eeg_semantic/reports/audit_full8_tora.json \
+  --output-dir outputs/eeg_semantic/reports/formal_fold1_seed42
+```
+
+generation manifest 中 `seed` 固定表示训练 seed，`generation_seed` 表示生成随机 seed；
+两者禁止合并或互相覆盖。不同 generator 覆盖的比较组必须分别审计，不能把 full8、first6
+和 Tora-injected manifest 混为一个 matched audit。
+
 PCA 只在对应 fold 的 train videos 上拟合，并在 metadata 中记录 train ID digest 和
 90%/95%/99% explained-variance 建议。prototype 也只从 train videos 构建。
 

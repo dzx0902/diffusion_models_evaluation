@@ -59,6 +59,7 @@ def semantic_rows(root: Path, allow_missing: bool) -> list[dict[str, Any]]:
             "retrieval_top1": None, "retrieval_top5": None,
             "invalid_pair_rate": 0.0, "unique_captions": audit["unique_captions"],
             "collapse_passed": audit["passed"], "selection": "validation checkpoint",
+            "primary_analysis": True,
             "source": str(path),
         })
     return rows
@@ -85,6 +86,7 @@ def tora_rows(root: Path, allow_missing: bool) -> list[dict[str, Any]]:
             "retrieval_top5": data["video_retrieval_top5"],
             "invalid_pair_rate": None, "unique_captions": None,
             "collapse_passed": None, "selection": "validation checkpoint",
+            "primary_analysis": True,
             "source": str(path),
         })
     return rows
@@ -116,6 +118,7 @@ def temporal_rows(root: Path, allow_missing: bool) -> list[dict[str, Any]]:
                 "unique_captions": audit["unique_captions"],
                 "collapse_passed": audit["passed"],
                 "selection": "validation checkpoint", "source": str(prediction_path),
+                "primary_analysis": True,
             })
         if report is None:
             if not allow_missing:
@@ -154,6 +157,7 @@ def temporal_rows(root: Path, allow_missing: bool) -> list[dict[str, Any]]:
                     if decoder == "hybrid"
                     else "fixed decoder"
                 ),
+                "primary_analysis": decoder == report["selected_decoder"],
                 "source": str(decoding_path),
             })
     return rows
@@ -204,6 +208,8 @@ def main() -> None:
         )
     leaders = {}
     for row in rows:
+        if not row["primary_analysis"]:
+            continue
         group = row["comparable_group"]
         if group not in leaders or row["primary_value"] > leaders[group]["primary_value"]:
             leaders[group] = row

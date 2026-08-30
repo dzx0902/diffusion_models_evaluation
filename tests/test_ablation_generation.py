@@ -62,9 +62,13 @@ def test_read_caption_predictions_and_build_dry_run(tmp_path: Path) -> None:
         ["demo"],
         [0, 1],
         tmp_path / "videos",
-        {},
+        {"training_seed": 42},
         dry_run=True,
     )
     assert len(result) == 2
     assert result[0]["status"] == "dry_run"
+    assert result[0]["seed"] == 42
+    assert result[0]["generation_seed"] == 0
+    assert result[1]["seed"] == 42
+    assert result[1]["generation_seed"] == 1
     assert "A ball moves." in result[0]["command"]
