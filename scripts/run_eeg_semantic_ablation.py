@@ -89,14 +89,20 @@ def main() -> None:
                 )
         if args.stage in {"generate", "all"}:
             protocol = matrix["protocol"]
-            if job.method in {"coarse_template", "structured_semantic", "temporal_category"}:
+            if job.method in {"coarse_template", "structured_semantic"}:
                 condition_input = job.output_dir / "test_semantic/predictions.json"
+                condition_kind = "caption"
+                generators = list(protocol["caption_generators"])
+            elif job.method == "temporal_category":
+                condition_input = job.output_dir / "temporal_decoding/selected_predictions.json"
                 condition_kind = "caption"
                 generators = list(protocol["caption_generators"])
             else:
                 condition_input = job.output_dir / "test_conditions/video_index.jsonl"
                 condition_kind = "tora_state"
                 generators = list(protocol["latent_generators"])
+            if not args.dry_run and not condition_input.is_file():
+                raise FileNotFoundError(f"Missing generation condition input: {condition_input}")
             trajectory_manifest = args.trajectory_manifest or ROOT / protocol["trajectory_manifest"]
             output = ROOT / "outputs/eeg_semantic/generated" / job.variant / job.subject / job.fold / f"seed{job.seed}"
             command = [

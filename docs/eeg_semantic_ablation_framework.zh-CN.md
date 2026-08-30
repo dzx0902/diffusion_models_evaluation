@@ -95,6 +95,8 @@ python scripts/build_formal_eeg_ablation_report.py \
 generation manifest 中 `seed` 固定表示训练 seed，`generation_seed` 表示生成随机 seed；
 两者禁止合并或互相覆盖。不同 generator 覆盖的比较组必须分别审计，不能把 full8、first6
 和 Tora-injected manifest 混为一个 matched audit。
+Temporal variants 的正式生成入口固定为 `temporal_decoding/selected_predictions.json`，
+禁止退回未经 validation 选择的 `test_semantic/predictions.json`。
 
 PCA 只在对应 fold 的 train videos 上拟合，并在 metadata 中记录 train ID digest 和
 90%/95%/99% explained-variance 建议。prototype 也只从 train videos 构建。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -46,3 +47,15 @@ def test_materialized_matrix_is_matched_and_resolves_fold_paths(tmp_path: Path) 
     }
     assert all(value["experiment"]["method"] == "temporal_category" for value in temporal.values())
     assert all(value["data"]["allowed_categories"] == ["01", "02", "03", "04", "05", "06"] for value in temporal.values())
+
+
+def test_temporal_generation_uses_validation_selected_predictions() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable, str(ROOT / "scripts/run_eeg_semantic_ablation.py"),
+            "--stage", "generate", "--variants", "a_1s4_first6", "--dry-run",
+        ],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    )
+    assert "temporal_decoding" in completed.stdout
+    assert "selected_predictions.json" in completed.stdout
