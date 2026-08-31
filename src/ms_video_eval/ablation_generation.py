@@ -189,7 +189,9 @@ def run_generation_matrix(
                     output.parent.mkdir(parents=True, exist_ok=True)
                     if temporary.exists():
                         temporary.unlink()
-                    completed = subprocess.run(command, check=False)
+                    environment = dict(os.environ)
+                    environment.setdefault("TOKENIZERS_PARALLELISM", "false")
+                    completed = subprocess.run(command, check=False, env=environment)
                     if completed.returncode or not temporary.is_file() or not temporary.stat().st_size:
                         record["status"] = "failed"
                         record["returncode"] = completed.returncode

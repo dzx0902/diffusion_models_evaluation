@@ -24,6 +24,10 @@ def test_server_generator_config_has_caption_and_tora_routes() -> None:
     assert models["tora"].requires_trajectory
     assert models["tora_injected"].condition_kinds == ("tora_state",)
     assert len(models) >= 8
+    hunyuan = models["hunyuanvideo_1_5"].command
+    assert hunyuan[:7] == (
+        "conda", "run", "-n", "hunyuanvideo15", "python", "-m", "torch.distributed.run"
+    )
     caption_models = [key for key, value in models.items() if "caption" in value.condition_kinds]
     records = run_generation_matrix(
         [{"video_id": "01-001", "prompt": "A person holds a ball."}],

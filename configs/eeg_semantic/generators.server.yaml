@@ -144,7 +144,10 @@ generators:
     required_paths:
       - "{models_root}/HunyuanVideo-1.5/generate.py"
       - "{models_root}/HunyuanVideo-1.5/ckpts/config.json"
-    command: [conda, run, -n, hunyuanvideo15, torchrun, --nproc_per_node, "1",
+    # Use the environment's Python module entry point. A bare `torchrun` can
+    # resolve to ~/.local/bin and silently launch the system interpreter.
+    command: [conda, run, -n, hunyuanvideo15, python, -m, torch.distributed.run,
+      --nproc_per_node, "1",
       "{models_root}/HunyuanVideo-1.5/generate.py", --prompt, "{prompt}",
       --image_path, none, --resolution, 480p, --aspect_ratio, "16:9",
       --seed, "{seed}", --rewrite, "false", --cfg_distilled, "false", --sr, "false",
