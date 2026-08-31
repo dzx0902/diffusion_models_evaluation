@@ -58,7 +58,10 @@ def test_read_caption_predictions_and_build_dry_run(tmp_path: Path) -> None:
     spec = AblationGenerator(
         id="demo",
         condition_kinds=("caption",),
-        command=("python", "generate.py", "--prompt", "{prompt}", "--output", "{output}"),
+        command=(
+            "python", "generate.py", "--prompt", "{prompt}", "--output", "{output}",
+            "--seed", "{seed}",
+        ),
     )
     result = run_generation_matrix(
         rows,
@@ -77,6 +80,8 @@ def test_read_caption_predictions_and_build_dry_run(tmp_path: Path) -> None:
     assert result[1]["seed"] == 42
     assert result[1]["generation_seed"] == 1
     assert "A ball moves." in result[0]["command"]
+    assert result[0]["command"][-1] == "42"
+    assert result[1]["command"][-1] == "43"
 
 
 def test_generation_preflight_checks_all_generators_before_launch(

@@ -151,7 +151,9 @@ def run_generation_matrix(
                         **variables,
                         **row,
                         "video_id": video_id,
-                        "seed": int(variables.get("training_seed", seed)),
+                        # Keep paired methods on the same deterministic seed
+                        # while giving generation repeats distinct RNG states.
+                        "seed": int(variables.get("training_seed", 0)) + int(seed),
                         "generation_seed": seed,
                         "trajectory": (trajectory_paths or [""])[0],
                         "trajectory_paths": trajectory_paths,
@@ -192,7 +194,7 @@ def run_generation_matrix(
                     **variables,
                     **row,
                     "video_id": video_id,
-                    "seed": int(variables.get("training_seed", seed)),
+                    "seed": int(variables.get("training_seed", 0)) + int(seed),
                     "generation_seed": seed,
                     "trajectory": (trajectory_paths or [""])[0],
                     "trajectory_paths": trajectory_paths,
