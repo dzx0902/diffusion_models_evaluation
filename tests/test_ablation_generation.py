@@ -28,6 +28,7 @@ def test_server_generator_config_has_caption_and_tora_routes() -> None:
     assert hunyuan[:7] == (
         "conda", "run", "-n", "hunyuanvideo15", "python", "-m", "torch.distributed.run"
     )
+    assert any(path.endswith("ckpts/vision_encoder/siglip") for path in models["hunyuanvideo_1_5"].required_paths)
     caption_models = [key for key, value in models.items() if "caption" in value.condition_kinds]
     records = run_generation_matrix(
         [{"video_id": "01-001", "prompt": "A person holds a ball."}],
@@ -76,3 +77,48 @@ def test_read_caption_predictions_and_build_dry_run(tmp_path: Path) -> None:
     assert result[1]["seed"] == 42
     assert result[1]["generation_seed"] == 1
     assert "A ball moves." in result[0]["command"]
+
+
+def test_generation_preflight_checks_all_generators_before_launch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    marker = tmp_path / "launched"
+    present = tmp_path / "present"
+    present.touch()
+    missing = tmp_path / "missing"
+    generators = {
+        "first": AblationGenerator(
+            id="first",
+            condition_kinds=("caption",),
+            command=("python", "generate.py", "--output", "{output}"),
+            required_paths=(str(present),),
+        ),
+        "second": AblationGenerator(
+            id="second",
+            condition_kinds=("caption",),
+            command=("python", "generate.py", "--output", "{output}"),
+            required_paths=(str(missing),),
+        ),
+    }
+
+    def unexpected_run(*args, **kwargs):
+        marker.touch()
+        raise AssertionError("subprocess must not start before preflight passes")
+
+    monkeypatch.setattr("ms_video_eval.ablation_generation.subprocess.run", unexpected_run)
+    try:
+        run_generation_matrix(
+            [{"video_id": "01-001", "prompt": "A ball moves."}],
+            "caption",
+            generators,
+            ["first", "second"],
+            [0],
+            tmp_path / "videos",
+            {"training_seed": 42},
+        )
+    except FileNotFoundError as error:
+        assert "second" in str(error)
+        assert str(missing) in str(error)
+    else:
+        raise AssertionError("missing generator input should fail preflight")
+    assert not marker.exists()

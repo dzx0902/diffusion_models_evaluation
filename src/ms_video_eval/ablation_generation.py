@@ -116,9 +116,60 @@ def run_generation_matrix(
 
     trajectories = trajectories or {}
     selected = list(selected)
+    seeds = list(seeds)
     unknown = set(selected) - set(generators)
     if unknown:
         raise KeyError(f"Unknown generators: {sorted(unknown)}")
+
+    # Validate every pending job before launching the first expensive model.
+    # This prevents a late generator with an incomplete checkpoint tree from
+    # failing only after earlier generators have already consumed GPU hours.
+    if not dry_run:
+        missing_by_generator: dict[str, set[Path]] = {}
+        for generator_id in selected:
+            spec = generators[generator_id]
+            if not spec.enabled:
+                raise ValueError(f"Generator {generator_id} is disabled")
+            if kind not in spec.condition_kinds:
+                raise ValueError(f"Generator {generator_id} does not support {kind}")
+            for row in rows:
+                video_id = row["video_id"]
+                if spec.requires_trajectory and video_id not in trajectories:
+                    raise KeyError(f"Missing fixed trajectory for {video_id}")
+                raw_trajectories = trajectories.get(video_id, [])
+                trajectory_paths = (
+                    [raw_trajectories]
+                    if isinstance(raw_trajectories, str)
+                    else list(raw_trajectories)
+                )
+                for seed in seeds:
+                    output = output_root / generator_id / f"{video_id}_seed{seed}.mp4"
+                    if skip_existing and output.is_file() and output.stat().st_size:
+                        continue
+                    temporary = output.with_name(f"{output.stem}.partial{output.suffix}")
+                    values = {
+                        **variables,
+                        **row,
+                        "video_id": video_id,
+                        "seed": int(variables.get("training_seed", seed)),
+                        "generation_seed": seed,
+                        "trajectory": (trajectory_paths or [""])[0],
+                        "trajectory_paths": trajectory_paths,
+                        "output": str(temporary),
+                    }
+                    required = [
+                        Path(value) for value in format_tokens(spec.required_paths, values)
+                    ]
+                    missing = {path for path in required if not path.exists()}
+                    if missing:
+                        missing_by_generator.setdefault(generator_id, set()).update(missing)
+        if missing_by_generator:
+            details = "; ".join(
+                f"{generator_id}: {', '.join(map(str, sorted(paths)))}"
+                for generator_id, paths in missing_by_generator.items()
+            )
+            raise FileNotFoundError(f"Generation preflight found missing inputs: {details}")
+
     manifest: list[dict[str, Any]] = []
     for generator_id in selected:
         spec = generators[generator_id]
@@ -148,13 +199,6 @@ def run_generation_matrix(
                     "output": str(temporary),
                 }
                 command = format_tokens(spec.command, values)
-                required = [Path(value) for value in format_tokens(spec.required_paths, values)]
-                if not dry_run:
-                    missing = [path for path in required if not path.exists()]
-                    if missing:
-                        raise FileNotFoundError(
-                            f"Missing inputs for {generator_id}: " + ", ".join(map(str, missing))
-                        )
                 record: dict[str, Any] = {
                     "schema_version": 1,
                     "generator": generator_id,
