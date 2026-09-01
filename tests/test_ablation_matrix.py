@@ -21,9 +21,12 @@ def test_deep_merge_preserves_unmodified_nested_values() -> None:
 
 
 def test_materialized_matrix_is_matched_and_resolves_fold_paths(tmp_path: Path) -> None:
-    _, jobs = materialize_jobs(
+    matrix, jobs = materialize_jobs(
         ROOT / "configs/eeg_semantic/ablation_matrix.yaml", ROOT, tmp_path
     )
+    protocol = matrix["protocol"]
+    assert len(protocol["caption_generators"]) == 7
+    assert "hunyuanvideo_1_5" not in protocol["caption_generators"]
     assert_matched_protocol(jobs)
     assert {job.variant for job in jobs} >= {"a_base", "b_base", "c1_mse", "c2_full"}
     c2 = next(job for job in jobs if job.variant == "c2_full")

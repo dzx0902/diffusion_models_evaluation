@@ -147,9 +147,9 @@ python scripts/export_tora_autoencoder_targets.py \
 - CogVideoX-2B、CogVideoX1.5-5B；
 - Wan2.2-TI2V-5B；
 - ContentV-8B；
-- HunyuanVideo-1.5。
+- HunyuanVideo-1.5（保留可选路由，但因额外 gated SigLIP 权重依赖，不纳入本次正式消融矩阵）。
 
-A/B caption 可以进入全部 caption generator。C1/C2/C3 是 Tora 特定空间，只进入
+A/B caption 在本次实验中进入前述 7 个启用的 caption generator。C1/C2/C3 是 Tora 特定空间，只进入
 `tora_injected`，不能把 Tora latent 当成其他模型的原生 text state。
 
 优先从 GT test videos 离线提取按实体区分的多轨迹。检测缺失帧只在同一视频内插值，

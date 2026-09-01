@@ -8,7 +8,7 @@ protocol:
   trajectory_source: fixed_gt
   generation_seeds: [0, 1, 2]
   caption_generators: [tora, animatediff, zeroscope, cogvideox2b, cogvideox1_5_5b,
-                       wan2_2_5b, contentv_8b, hunyuanvideo_1_5]
+                       wan2_2_5b, contentv_8b]
   latent_generators: [tora_injected]
   generator_config: configs/eeg_semantic/generators.server.yaml
   trajectory_manifest: outputs/tora/trajectories/fold1_test/manifest.jsonl
