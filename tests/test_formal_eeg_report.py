@@ -66,3 +66,26 @@ def test_phase2_writes_summary_and_paired_tests(tmp_path: Path) -> None:
     assert (tmp_path / "video_summary.csv").is_file()
     assert (tmp_path / "video_paired_tests.csv").is_file()
     assert "a_enhanced" in "\n".join(lines)
+
+
+def test_phase2_compares_main_three_methods_in_normalized_tora_family(tmp_path: Path) -> None:
+    path = tmp_path / "video.csv"
+    fields = [
+        "variant", "generator", "subject", "fold", "seed",
+        "generation_seed", "video_id", "metric", "value",
+    ]
+    rows = []
+    for variant, offset in (("a_enhanced", 0.0), ("b_enhanced", 0.1), ("c2_full", 0.2)):
+        for video in ("01-001", "01-002"):
+            rows.append({
+                "variant": variant, "generator": "tora",
+                "subject": "chentianlin", "fold": "video_6fold_1", "seed": 42,
+                "generation_seed": 0, "video_id": video,
+                "metric": "semantic_clip_score", "value": 0.5 + offset,
+            })
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    _, status = phase2_sections(path, [{"status": "PASS", "jobs": 6}], tmp_path)
+    assert status["paired_comparisons"] == 2

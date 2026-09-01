@@ -18,7 +18,18 @@ def read(paths: list[Path]) -> list[dict[str, Any]]:
     ]
 
 
-def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def audit(
+    rows: list[dict[str, Any]],
+    generators: set[str] | None = None,
+    generator_aliases: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    generator_aliases = generator_aliases or {}
+    if generators is not None:
+        rows = [row for row in rows if str(row["generator"]) in generators]
+    rows = [
+        {**row, "generator": generator_aliases.get(str(row["generator"]), str(row["generator"]))}
+        for row in rows
+    ]
     variants = sorted({str(row["variant"]) for row in rows})
     grouped: dict[tuple[str, str, int, int], dict[str, dict[str, Any]]] = defaultdict(dict)
     duplicates = []
@@ -40,7 +51,7 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
         }
         if len(hashes) > 1:
             trajectory_mismatches.append(key)
-    failed = bool(duplicates or unmatched or trajectory_mismatches)
+    failed = bool(not rows or duplicates or unmatched or trajectory_mismatches)
     return {
         "schema_version": 1,
         "variants": variants,
@@ -49,6 +60,8 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "duplicates": duplicates,
         "unmatched_cells": unmatched,
         "trajectory_mismatches": trajectory_mismatches,
+        "generator_filter": sorted(generators) if generators is not None else None,
+        "generator_aliases": generator_aliases,
         "status": "FAIL" if failed else "PASS",
     }
 
@@ -56,9 +69,24 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifests", type=Path, nargs="+", required=True)
+    parser.add_argument("--generators", nargs="+", default=None)
+    parser.add_argument(
+        "--generator-alias", action="append", default=[], metavar="SOURCE=TARGET",
+        help="Normalize routes into one paired comparison family; may be repeated.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    result = audit(read(args.manifests))
+    aliases = {}
+    for value in args.generator_alias:
+        if "=" not in value:
+            parser.error(f"Invalid --generator-alias {value!r}; expected SOURCE=TARGET")
+        source, target = value.split("=", 1)
+        aliases[source] = target
+    result = audit(
+        read(args.manifests),
+        set(args.generators) if args.generators is not None else None,
+        aliases,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))

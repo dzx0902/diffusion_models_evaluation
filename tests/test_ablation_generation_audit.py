@@ -29,3 +29,21 @@ def test_audit_rejects_changed_trajectory() -> None:
          "trajectory_sha256": "two"},
     ]
     assert audit(rows)["status"] == "FAIL"
+
+
+def test_audit_filters_and_aliases_tora_routes() -> None:
+    rows = [
+        {"variant": "a", "generator": "tora", "video_id": "v1", "seed": 42,
+         "generation_seed": 0, "trajectory_sha256": "same"},
+        {"variant": "a", "generator": "animatediff", "video_id": "v1", "seed": 42,
+         "generation_seed": 0},
+        {"variant": "c", "generator": "tora_injected", "video_id": "v1", "seed": 42,
+         "generation_seed": 0, "trajectory_sha256": "same"},
+    ]
+    result = audit(
+        rows,
+        {"tora", "tora_injected"},
+        {"tora_injected": "tora"},
+    )
+    assert result["status"] == "PASS"
+    assert result["matched_cells"] == 1

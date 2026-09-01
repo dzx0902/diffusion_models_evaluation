@@ -20,6 +20,10 @@ from ms_video_eval.ablation_statistics import aggregate_long_metrics, paired_com
 
 
 VIDEO_GROUPS = {
+    "main_three_methods": {
+        "baseline": "a_enhanced",
+        "variants": {"a_enhanced", "b_enhanced", "c2_full"},
+    },
     "full8_caption": {
         "baseline": "a_base",
         "variants": {"a_base", "a_enhanced", "b_base", "b_enhanced"},

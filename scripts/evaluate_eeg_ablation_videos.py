@@ -56,13 +56,19 @@ def main() -> None:
                     metrics["object_clip_score"] = scorer.score(frames, " and ".join(record.objects))
                 if record.fine_actions:
                     metrics["action_clip_score"] = scorer.score(frames, " and ".join(record.fine_actions))
-            common = {"variant": item["variant"], "generator": item["generator"],
+            generator_route = str(item["generator"])
+            # Native-caption Tora and injected-condition Tora use the same
+            # video backbone and fixed trajectory. Normalize only the
+            # comparison family while preserving the original route.
+            comparison_generator = "tora" if generator_route == "tora_injected" else generator_route
+            common = {"variant": item["variant"], "generator": comparison_generator,
+                      "generator_route": generator_route,
                       "subject": item["subject"], "fold": item["fold"], "seed": item["seed"],
                       "generation_seed": item["generation_seed"],
                       "video_id": video_id}
             rows.extend({**common, "metric": key, "value": value} for key, value in metrics.items())
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["variant", "generator", "subject", "fold", "seed", "generation_seed", "video_id", "metric", "value"]
+    fields = ["variant", "generator", "generator_route", "subject", "fold", "seed", "generation_seed", "video_id", "metric", "value"]
     with args.output.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
     print(f"[eeg-ablation-video-eval] rows={len(rows)} output={args.output}")
