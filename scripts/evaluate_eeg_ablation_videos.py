@@ -38,11 +38,12 @@ def main() -> None:
         for item in records:
             if item["status"] not in {"success", "skipped_existing"}:
                 continue
+            generator_route = str(item["generator"])
             video_id = str(item["video_id"]); record = labels[video_id]
             frames = sample_video(Path(item["output"]), args.sample_every)
             metrics = frame_diagnostics(frames)
             trajectories = item.get("trajectory_paths") or ([item["trajectory"]] if item.get("trajectory") else [])
-            if trajectories:
+            if trajectories and generator_route in {"tora", "tora_injected"}:
                 scores = [
                     trajectory_direction_score(frames, parse_trajectory_points(Path(path)))
                     for path in trajectories
@@ -56,7 +57,6 @@ def main() -> None:
                     metrics["object_clip_score"] = scorer.score(frames, " and ".join(record.objects))
                 if record.fine_actions:
                     metrics["action_clip_score"] = scorer.score(frames, " and ".join(record.fine_actions))
-            generator_route = str(item["generator"])
             # Native-caption Tora and injected-condition Tora use the same
             # video backbone and fixed trajectory. Normalize only the
             # comparison family while preserving the original route.
