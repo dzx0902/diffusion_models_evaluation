@@ -50,6 +50,27 @@ class ResidualEEG(nn.Module):
         return self.head(self.encoder(eeg)["fused_feature"])
 
 
+class SessionResidualEEG(ResidualEEG):
+    def session_predictions(self, eeg: torch.Tensor) -> torch.Tensor:
+        return self.head(self.encoder(eeg)["features"])
+
+    def forward(self, eeg: torch.Tensor) -> torch.Tensor:
+        return self.session_predictions(eeg).mean(1)
+
+
+def normalize_sessions(package: dict, sessions: list[int]) -> dict:
+    """Undo cached normalization, then fit shared channel statistics on allowed train sessions."""
+    raw = (package["eeg"] * package["normalization_std"][None, :, :, None]
+           + package["normalization_mean"][None, :, :, None])
+    fit = raw[package["splits"]["train"]][:, sessions]
+    mean = fit.mean((0, 1, 3))
+    std = fit.std((0, 1, 3)).clamp_min(1e-6)
+    result = dict(package)
+    result["eeg"] = (raw - mean[None, None, :, None]) / std[None, None, :, None]
+    result["shared_mean"], result["shared_std"] = mean, std
+    return result
+
+
 def contrastive_loss(pred: torch.Tensor, bank: torch.Tensor, positives: torch.Tensor,
                      temperature: float = 0.1) -> torch.Tensor:
     if not positives.any(1).all():

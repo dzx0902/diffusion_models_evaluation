@@ -19,7 +19,7 @@ for path in (ROOT, ROOT / "src"):
     sys.path.insert(0, str(path))
 
 from ms_video_eval.c2_residual import (
-    ResidualEEG, fit_pca, encode, decode, contrastive_loss,
+    ResidualEEG, SessionResidualEEG, fit_pca, encode, decode, contrastive_loss,
     variance_covariance, retrieval, within_category_permutation,
 )
 from ms_video_eval.eeg2caption_adapter import load_eeg2caption_fold, normalization_stats
@@ -121,13 +121,17 @@ def train(args, package, fingerprint, output):
                  "epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
                  "weight_decay": args.weight_decay, "dropout": args.dropout,
                  "temperature": args.temperature, "patience": args.patience, "min_epochs": args.min_epochs}
+    if getattr(args, "session_mode", False):
+        signature.update(session_mode=True, consistency_weight=args.consistency_weight,
+                         session_protocol=args.session_protocol)
     if (output / "completed.json").exists():
         completed = json.loads((output / "completed.json").read_text())
         if completed["signature"] != signature:
             raise ValueError("Completed run settings differ; use a new --output-root")
         print(f"[c2-residual] already completed {output}", flush=True)
         return
-    model = ResidualEEG(package["z"].shape[1], args.dropout).to(args.device)
+    model_type = SessionResidualEEG if getattr(args, "session_mode", False) else ResidualEEG
+    model = model_type(package["z"].shape[1], args.dropout).to(args.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     generator = torch.Generator().manual_seed(args.seed)
@@ -176,11 +180,21 @@ def train(args, package, fingerprint, output):
         model.train()
         total, count = 0.0, 0
         for eeg, target, labels in loader:
-            pred = model(eeg.to(args.device))
-            target = target.to(args.device)
+            session_loss = None
+            if getattr(args, "session_mode", False):
+                session_pred = model.session_predictions(eeg.to(args.device))
+                session_loss = (session_pred - session_pred.mean(1, keepdim=True)).square().mean()
+                pred = session_pred.flatten(0, 1)
+                target = target[:, None].expand(-1, session_pred.shape[1], -1).flatten(0, 1).to(args.device)
+                labels = labels[:, None].expand(-1, session_pred.shape[1]).flatten()
+            else:
+                pred = model(eeg.to(args.device))
+                target = target.to(args.device)
             loss = F.mse_loss(pred, target)
-            if args.variant in {"contrastive", "variance"}:
+            if args.variant in {"contrastive", "variance", "single_session", "consistent"}:
                 loss = loss + contrastive_loss(pred, bank, labels.to(args.device)[:, None] == bank_ids[None, :], args.temperature)
+            if session_loss is not None:
+                loss = loss + args.consistency_weight * session_loss
             if args.variant == "variance":
                 var, cov = variance_covariance(pred)
                 loss = loss + 0.1 * var + 0.001 * cov
