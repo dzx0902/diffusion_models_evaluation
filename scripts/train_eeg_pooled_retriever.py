@@ -16,6 +16,7 @@ from typing import Any, Iterator
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 
@@ -86,8 +87,24 @@ def parse_args() -> argparse.Namespace:
         default="batch",
         help="Use batch negatives or all unique prompt targets in the active split.",
     )
+    parser.add_argument(
+        "--negative-scope",
+        choices=("global", "category"),
+        default="global",
+        help="Restrict full-bank negatives to the same coarse video category.",
+    )
     parser.add_argument("--variance-weight", type=float, default=0.05)
     parser.add_argument("--covariance-weight", type=float, default=0.005)
+    parser.add_argument(
+        "--selection-metric",
+        choices=(
+            "mrr",
+            "session_averaged_mrr",
+            "within_category_mrr",
+            "session_averaged_within_category_mrr",
+        ),
+        default="mrr",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
@@ -166,7 +183,11 @@ def build_prompt_bank(
         if prompt in bank:
             torch.testing.assert_close(bank[prompt]["vector"], vector, atol=1e-5, rtol=1e-5)
             continue
-        bank[prompt] = {"video_id": video_id, "vector": vector}
+        bank[prompt] = {
+            "video_id": video_id,
+            "category_id": str(row.get("category_id") or video_id.split("-", 1)[0]),
+            "vector": vector,
+        }
     if not bank:
         raise ValueError("Cannot build an empty prompt bank")
     return bank
@@ -220,6 +241,9 @@ class PooledEEGDataset(Dataset):
             "eeg": torch.from_numpy(signal),
             "target": self.target_cache[video_id],
             "prompt": prompt,
+            "category_id": str(
+                target_row.get("category_id") or video_id.split("-", 1)[0]
+            ),
             "video_id": video_id,
             "session": row["session"],
             "trial_index": int(row["trial_index"]),
@@ -231,6 +255,7 @@ def collate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "eeg": torch.stack([row["eeg"] for row in rows]),
         "target": torch.stack([row["target"] for row in rows]),
         "prompt": [row["prompt"] for row in rows],
+        "category_id": [row["category_id"] for row in rows],
         "video_id": [row["video_id"] for row in rows],
         "session": [row["session"] for row in rows],
         "trial_index": [row["trial_index"] for row in rows],
@@ -303,24 +328,28 @@ def standardized_bank(
     mean: torch.Tensor,
     scale: torch.Tensor,
     device: torch.device,
-) -> tuple[list[str], torch.Tensor, dict[str, int]]:
+) -> tuple[list[str], torch.Tensor, dict[str, int], list[str]]:
     prompts = sorted(bank)
     candidates = torch.stack(
         [(bank[prompt]["vector"] - mean) / scale for prompt in prompts]
     ).to(device)
-    return prompts, candidates, {prompt: index for index, prompt in enumerate(prompts)}
+    categories = [str(bank[prompt]["category_id"]) for prompt in prompts]
+    return prompts, candidates, {prompt: index for index, prompt in enumerate(prompts)}, categories
 
 
 def full_bank_loss_kwargs(
     batch_prompts: list[str],
+    batch_categories: list[str],
     candidates: torch.Tensor,
     prompt_indices: dict[str, int],
+    candidate_categories: list[str],
     device: torch.device,
     enabled: bool,
+    negative_scope: str,
 ) -> dict[str, Any]:
     if not enabled:
         return {}
-    return {
+    result = {
         "contrastive_candidates": candidates,
         "contrastive_true_indices": torch.tensor(
             [prompt_indices[prompt] for prompt in batch_prompts],
@@ -329,6 +358,39 @@ def full_bank_loss_kwargs(
         ),
         "variance_target_std": candidates.std(dim=0, unbiased=False),
     }
+    if negative_scope == "category":
+        result["contrastive_candidate_mask"] = torch.tensor(
+            [
+                [candidate == category for candidate in candidate_categories]
+                for category in batch_categories
+            ],
+            dtype=torch.bool,
+            device=device,
+        )
+    return result
+
+
+def masked_retrieval_ranks(
+    similarities: torch.Tensor,
+    true_indices: torch.Tensor,
+    query_categories: list[str],
+    candidate_categories: list[str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    mask = torch.tensor(
+        [
+            [candidate == category for candidate in candidate_categories]
+            for category in query_categories
+        ],
+        dtype=torch.bool,
+        device=similarities.device,
+    )
+    if not mask.gather(1, true_indices[:, None]).all():
+        raise ValueError("Within-category retrieval mask removed a true caption")
+    masked = similarities.masked_fill(~mask, float("-inf"))
+    truth = masked.gather(1, true_indices[:, None])
+    greater = (masked > truth).sum(dim=1).float()
+    ties = torch.isclose(masked, truth, atol=1e-7, rtol=1e-6).sum(dim=1)
+    return 1.0 + greater + 0.5 * (ties.float() - 1.0), masked
 
 
 def evaluate(
@@ -340,9 +402,10 @@ def evaluate(
     device: torch.device,
     weights: dict[str, float],
     contrastive_bank: str,
+    negative_scope: str,
 ) -> tuple[dict[str, float], list[dict[str, Any]]]:
     model.eval()
-    prompts, candidates, prompt_indices = standardized_bank(
+    prompts, candidates, prompt_indices, candidate_categories = standardized_bank(
         candidate_bank, mean, scale, device
     )
     predictions = []
@@ -361,10 +424,13 @@ def evaluate(
                 **weights,
                 **full_bank_loss_kwargs(
                     batch["prompt"],
+                    batch["category_id"],
                     candidates,
                     prompt_indices,
+                    candidate_categories,
                     device,
                     contrastive_bank == "train",
+                    negative_scope,
                 ),
             )
             losses.append({**values, "count": len(batch["prompt"])})
@@ -377,6 +443,7 @@ def evaluate(
                         "session": batch["session"][index],
                         "trial_index": batch["trial_index"][index],
                         "prompt": prompt,
+                        "category_id": batch["category_id"][index],
                     }
                 )
     predicted = torch.cat(predictions).to(device)
@@ -387,7 +454,14 @@ def evaluate(
         device=device,
     )
     ranks, similarities = retrieval_ranks(predicted, candidates, true_indices)
+    within_ranks, within_similarities = masked_retrieval_ranks(
+        similarities,
+        true_indices,
+        [row["category_id"] for row in metadata],
+        candidate_categories,
+    )
     nearest = similarities.argmax(dim=1)
+    within_nearest = within_similarities.argmax(dim=1)
     true_similarities = similarities.gather(1, true_indices[:, None]).squeeze(1)
     other_similarities = similarities.clone()
     other_similarities.scatter_(1, true_indices[:, None], float("-inf"))
@@ -419,8 +493,23 @@ def evaluate(
             "candidate_prompts": len(prompts),
             "chance_recall_at_1": 1.0 / len(prompts),
             "chance_recall_at_5": min(5.0 / len(prompts), 1.0),
+            "within_category_recall_at_1": float((within_ranks <= 1).float().mean()),
+            "within_category_recall_at_5": float((within_ranks <= 5).float().mean()),
+            "within_category_mrr": float((1.0 / within_ranks).mean()),
+            "within_category_mean_rank": float(within_ranks.mean()),
         }
     )
+    category_candidate_counts = {
+        category: candidate_categories.count(category)
+        for category in set(candidate_categories)
+    }
+    metrics["within_category_chance_recall_at_1"] = float(np.mean([
+        1.0 / category_candidate_counts[row["category_id"]] for row in metadata
+    ]))
+    metrics["within_category_chance_recall_at_5"] = float(np.mean([
+        min(5.0 / category_candidate_counts[row["category_id"]], 1.0)
+        for row in metadata
+    ]))
     grouped = grouped_retrieval_metrics(
         predicted,
         candidates,
@@ -430,9 +519,50 @@ def evaluate(
     metrics.update(
         {f"session_averaged_{key}": value for key, value in grouped.items()}
     )
+    grouped_indices: dict[str, list[int]] = defaultdict(list)
+    for index, row in enumerate(metadata):
+        grouped_indices[row["video_id"]].append(index)
+    averaged_predictions = []
+    averaged_labels = []
+    averaged_categories = []
+    for video_id, indices in grouped_indices.items():
+        labels = true_indices[indices]
+        categories = {metadata[index]["category_id"] for index in indices}
+        if not torch.equal(labels, labels[:1].expand_as(labels)) or len(categories) != 1:
+            raise ValueError(f"Inconsistent repeated observations for {video_id}")
+        averaged_predictions.append(predicted[indices].mean(dim=0))
+        averaged_labels.append(labels[0])
+        averaged_categories.append(next(iter(categories)))
+    averaged_predictions_tensor = torch.stack(averaged_predictions)
+    averaged_similarities = (
+        F.normalize(averaged_predictions_tensor, dim=-1)
+        @ F.normalize(candidates, dim=-1).t()
+    )
+    averaged_labels_tensor = torch.stack(averaged_labels)
+    averaged_within_ranks, _ = masked_retrieval_ranks(
+        averaged_similarities,
+        averaged_labels_tensor,
+        averaged_categories,
+        candidate_categories,
+    )
+    metrics.update({
+        "session_averaged_within_category_recall_at_1": float(
+            (averaged_within_ranks <= 1).float().mean()
+        ),
+        "session_averaged_within_category_recall_at_5": float(
+            (averaged_within_ranks <= 5).float().mean()
+        ),
+        "session_averaged_within_category_mrr": float(
+            (1.0 / averaged_within_ranks).mean()
+        ),
+        "session_averaged_within_category_mean_rank": float(
+            averaged_within_ranks.mean()
+        ),
+    })
     trial_rows = []
     for index, row in enumerate(metadata):
         nearest_prompt = prompts[int(nearest[index].item())]
+        within_nearest_prompt = prompts[int(within_nearest[index].item())]
         trial_rows.append(
             {
                 **row,
@@ -445,6 +575,9 @@ def evaluate(
                 "nearest_video_id": candidate_bank[nearest_prompt]["video_id"],
                 "nearest_cosine": float(similarities[index, nearest[index]].item()),
                 "retrieval_margin": float(retrieval_margin[index].item()),
+                "within_category_rank": float(within_ranks[index].item()),
+                "within_category_nearest_prompt": within_nearest_prompt,
+                "within_category_nearest_video_id": candidate_bank[within_nearest_prompt]["video_id"],
             }
         )
     return metrics, trial_rows
@@ -527,6 +660,8 @@ def main() -> None:
         "validation_prompts": len(valid_bank),
         "group_sessions": args.group_sessions,
         "contrastive_bank": args.contrastive_bank,
+        "negative_scope": args.negative_scope,
+        "selection_metric": args.selection_metric,
     }
     print(f"[eeg-pooled] protocol={json.dumps(protocol)}", flush=True)
 
@@ -554,6 +689,7 @@ def main() -> None:
             device,
             weights,
             args.contrastive_bank,
+            args.negative_scope,
         )
         result = {
             "checkpoint": str(args.checkpoint),
@@ -605,7 +741,7 @@ def main() -> None:
 
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
-        _, train_candidates, train_prompt_indices = standardized_bank(
+        _, train_candidates, train_prompt_indices, train_candidate_categories = standardized_bank(
             train_bank, mean, scale, device
         )
         for batch in train_loader:
@@ -618,10 +754,13 @@ def main() -> None:
                 **weights,
                 **full_bank_loss_kwargs(
                     batch["prompt"],
+                    batch["category_id"],
                     train_candidates,
                     train_prompt_indices,
+                    train_candidate_categories,
                     device,
                     args.contrastive_bank == "train",
+                    args.negative_scope,
                 ),
             )
             loss.backward()
@@ -637,13 +776,15 @@ def main() -> None:
             device,
             weights,
             args.contrastive_bank,
+            args.negative_scope,
         )
         record = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"], "valid": valid}
         with history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
-        improved = valid["mrr"] > best_mrr + args.early_stop_min_delta
+        selected_value = valid[args.selection_metric]
+        improved = selected_value > best_mrr + args.early_stop_min_delta
         if improved:
-            best_mrr = valid["mrr"]
+            best_mrr = selected_value
             stale_epochs = 0
         else:
             stale_epochs += 1
@@ -659,7 +800,7 @@ def main() -> None:
             "protocol": protocol,
             "loss_weights": weights,
             "early_stopping": {
-                "metric": "mrr",
+                "metric": args.selection_metric,
                 "best_mrr": best_mrr,
                 "stale_epochs": stale_epochs,
                 "patience": args.early_stop_patience,

@@ -46,6 +46,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--device", default=None)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--init-checkpoint", type=Path, default=None,
+        help="Warm-start model weights only; optimizer/config may change between stages.",
+    )
     parser.add_argument("--smoke", action="store_true")
     return parser.parse_args()
 
@@ -152,14 +156,23 @@ def alignment_losses(
     labels: torch.Tensor, object_pos_weight: torch.Tensor,
     target_mean: torch.Tensor | None, prototypes: torch.Tensor,
     weights: dict[str, float], contrastive: dict[str, Any], scales: dict[str, float],
+    alignment_level: str = "token",
 ) -> tuple[torch.Tensor, dict[str, float], torch.Tensor]:
     predicted = output["latent"]
     if target_mean is not None:
         predicted = predicted + target_mean
-    mse = F.mse_loss(predicted, target)
-    cosine_loss = 1.0 - F.cosine_similarity(predicted, target, dim=-1).mean()
     predicted_pooled = predicted.mean(dim=1)
     target_pooled = target.mean(dim=1)
+    if alignment_level == "token":
+        mse = F.mse_loss(predicted, target)
+        cosine_loss = 1.0 - F.cosine_similarity(predicted, target, dim=-1).mean()
+    elif alignment_level == "pooled":
+        mse = F.mse_loss(predicted_pooled, target_pooled)
+        cosine_loss = 1.0 - F.cosine_similarity(
+            predicted_pooled, target_pooled, dim=-1
+        ).mean()
+    else:
+        raise ValueError(f"Unknown alignment level: {alignment_level!r}")
     temperature = float(contrastive.get("temperature", 0.07))
     similarity = F.normalize(predicted_pooled, dim=-1) @ F.normalize(target_pooled, dim=-1).t()
     mode = str(contrastive.get("mode", "hard_multi_positive"))
@@ -267,6 +280,8 @@ def evaluate(
 
 def main() -> None:
     args = parse_args()
+    if args.resume and args.init_checkpoint is not None:
+        raise ValueError("Use either --resume or --init-checkpoint, not both")
     config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     method = config["experiment"]["method"]
     if method not in {"direct_tora_text", "tora_pca", "tora_autoencoder"}:
@@ -310,8 +325,12 @@ def main() -> None:
         noise_std=float(augmentation.get("noise_std", 0.0)),
         time_mask_samples=int(augmentation.get("time_mask_samples", 0)),
     )
+    validation_partition = str(data.get("validation_partition", "validation"))
+    if validation_partition not in {"train", "validation", "test"}:
+        raise ValueError(f"Unknown validation partition: {validation_partition}")
     validation_set = CompactAlignmentDataset(
-        **shared, indices=fold.split_indices["validation"]
+        **shared,
+        indices=(train_indices if validation_partition == "train" else fold.split_indices[validation_partition]),
     )
     training = config["training"]
     generator = torch.Generator().manual_seed(seed)
@@ -335,6 +354,19 @@ def main() -> None:
     if target_mean is not None:
         torch.nn.init.zeros_(model.condition_head[-1].weight)
         torch.nn.init.zeros_(model.condition_head[-1].bias)
+    if args.init_checkpoint is not None:
+        initial = torch.load(resolve(args.init_checkpoint), map_location="cpu", weights_only=False)
+        initial_mean = initial.get("target_mean")
+        if (initial_mean is None) != (target_mean is None) or (
+            initial_mean is not None
+            and not torch.allclose(initial_mean.cpu(), target_mean.cpu(), atol=1e-6, rtol=1e-6)
+        ):
+            raise ValueError("Warm-start checkpoint target centering differs")
+        model.load_state_dict(initial["model_state"])
+        print(
+            f"[compact-tora] initialized model from {resolve(args.init_checkpoint)}",
+            flush=True,
+        )
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=float(training.get("learning_rate", 2e-4)),
         weight_decay=float(training.get("weight_decay", 1e-4)),
@@ -366,7 +398,16 @@ def main() -> None:
     atomic_json(config, output_dir / "resolved_config.json")
     atomic_json({
         "train": train_ids,
-        "validation": [fold.video_ids[index] for index in fold.split_indices["validation"]],
+        "validation": [
+            fold.video_ids[index]
+            for index in (
+                train_indices
+                if validation_partition == "train"
+                else fold.split_indices[validation_partition]
+            )
+        ],
+        "validation_partition": validation_partition,
+        "diagnostic_train_evaluation": validation_partition == "train",
         "test": [fold.video_ids[index] for index in fold.split_indices["test"]],
         "normalization_fit": "train_only", "target_statistics_fit": "train_only",
         "session_fusion": "Compact features + query cross-attention",
@@ -392,6 +433,11 @@ def main() -> None:
         start_epoch = int(checkpoint["epoch"]) + 1
         print(f"[compact-tora] resuming epoch {start_epoch}", flush=True)
     accumulation = int(training.get("gradient_accumulation_steps", 1))
+    alignment_level = str(config.get("alignment", {}).get("level", "token"))
+    selection_metric = str(config.get("selection", {}).get("metric", "composite"))
+    selection_mode = str(config.get("selection", {}).get("mode", "max"))
+    if selection_mode not in {"min", "max"}:
+        raise ValueError(f"Unknown selection mode: {selection_mode}")
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
@@ -413,6 +459,7 @@ def main() -> None:
                     output, target, categories, labels, object_pos_weight,
                     None if target_mean is None else target_mean.to(device),
                     prototypes.to(device), weights, config.get("contrastive", {}), scales,
+                    alignment_level,
                 )
             scaler.scale(loss / accumulation).backward()
             if (batch_index + 1) % accumulation == 0 or batch_index + 1 == len(train_loader):
@@ -432,16 +479,26 @@ def main() -> None:
             model, validation_loader, device,
             None if target_mean is None else target_mean.to(device),
         )
-        score = (
-            validation["retrieval_top5"] + 0.25 * validation["retrieval_top1"]
-            + 0.01 * validation["token_cosine"]
-        )
+        if selection_metric == "composite":
+            selection_value = (
+                validation["retrieval_top5"] + 0.25 * validation["retrieval_top1"]
+                + 0.01 * validation["token_cosine"]
+            )
+        elif selection_metric in validation:
+            selection_value = validation[selection_metric]
+        else:
+            raise KeyError(f"Unknown validation selection metric: {selection_metric}")
+        score = selection_value if selection_mode == "max" else -selection_value
         record = {
             "epoch": epoch, "train_loss": total_loss / max(1, examples),
             "train_components": {
                 name: value / max(1, examples) for name, value in component_sums.items()
             },
-            "validation": validation, "selection_score": score,
+            "validation": validation,
+            "selection_metric": selection_metric,
+            "selection_mode": selection_mode,
+            "selection_value": selection_value,
+            "selection_score": score,
             "curriculum_scales": scales, "learning_rate": optimizer.param_groups[0]["lr"],
         }
         with history_path.open("a", encoding="utf-8") as handle:
@@ -462,6 +519,10 @@ def main() -> None:
         payload = {
             "schema_version": 2, "implementation": "EEG2Caption Compact shared",
             "method": method, "epoch": epoch, "model_state": model.state_dict(),
+            "training_stage": str(config["experiment"].get("stage", "single")),
+            "alignment_level": alignment_level,
+            "selection_metric": selection_metric,
+            "selection_mode": selection_mode,
             "model_config": model_config, "normalization_mean": mean,
             "normalization_std": std, "eeg_scale": eeg_scale,
             "target_mean": target_mean, "validation": validation, "config": config,

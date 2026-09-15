@@ -1,0 +1,66 @@
+schema_version: 1
+base_config: configs/eeg_semantic/method_c_pca_tora.yaml
+config_output_dir: outputs/eeg_semantic/experiment_configs/c2_multistage
+
+stages:
+  - id: classifier_pretrain
+    overrides:
+      experiment:
+        name: c2_classifier_pretrain_chentianlin_fold1_seed42
+        stage: classifier_pretrain
+        output_dir: outputs/eeg_semantic/runs_c2_multistage/classifier_pretrain/chentianlin/video_6fold_1/seed42
+      alignment: {level: pooled}
+      selection: {metric: category_accuracy, mode: max}
+      loss:
+        {mse: 0.0, cosine: 0.0, contrastive: 0.0,
+         auxiliary_classification: 1.0, session_consistency: 0.1, prototype: 0.0}
+      training: {epochs: 40, learning_rate: 0.0003, weight_decay: 0.0001}
+
+  - id: pooled_alignment
+    init_from: classifier_pretrain
+    overrides:
+      experiment:
+        name: c2_pooled_alignment_chentianlin_fold1_seed42
+        stage: pooled_alignment
+        output_dir: outputs/eeg_semantic/runs_c2_multistage/pooled_alignment/chentianlin/video_6fold_1/seed42
+      alignment: {level: pooled}
+      selection: {metric: token_cosine, mode: max}
+      loss:
+        {mse: 1.0, cosine: 0.5, contrastive: 0.5,
+         auxiliary_classification: 0.2, session_consistency: 0.1, prototype: 0.05}
+      contrastive: {temperature: 0.07, mode: soft_semantic, semantic_temperature: 0.07}
+      training: {epochs: 80, learning_rate: 0.0002, weight_decay: 0.0001}
+
+  - id: token_refinement
+    init_from: pooled_alignment
+    overrides:
+      experiment:
+        name: c2_token_refinement_chentianlin_fold1_seed42
+        stage: token_refinement
+        output_dir: outputs/eeg_semantic/runs_c2_multistage/token_refinement/chentianlin/video_6fold_1/seed42
+      alignment: {level: token}
+      selection: {metric: composite, mode: max}
+      loss:
+        {mse: 1.0, cosine: 0.2, contrastive: 0.2,
+         auxiliary_classification: 0.1, session_consistency: 0.1, prototype: 0.05}
+      contrastive: {temperature: 0.07, mode: soft_semantic, semantic_temperature: 0.07}
+      training: {epochs: 120, learning_rate: 0.0001, weight_decay: 0.0001}
+
+  # This stage deliberately evaluates on train. It is an optimization/capacity
+  # diagnostic and must never be reported as held-out semantic performance.
+  - id: train_overfit_diagnostic
+    init_from: token_refinement
+    overrides:
+      experiment:
+        name: c2_train_overfit_diagnostic_chentianlin_fold1_seed42
+        stage: train_overfit_diagnostic
+        output_dir: outputs/eeg_semantic/runs_c2_multistage/train_overfit_diagnostic/chentianlin/video_6fold_1/seed42
+      data: {validation_partition: train}
+      model: {dropout: 0.05}
+      alignment: {level: token}
+      selection: {metric: mse, mode: min}
+      augmentation: {noise_std: 0.0, time_mask_samples: 0}
+      loss:
+        {mse: 3.0, cosine: 0.5, contrastive: 0.2,
+         auxiliary_classification: 0.1, session_consistency: 0.0, prototype: 0.0}
+      training: {epochs: 300, learning_rate: 0.0001, weight_decay: 0.0}

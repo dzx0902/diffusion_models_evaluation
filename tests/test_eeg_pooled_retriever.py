@@ -24,6 +24,7 @@ from ms_video_eval.eeg_pooled_retriever import (
     retrieval_ranks,
 )
 from build_eeg_pooled_retrieval_suite import select_trials
+from build_category_residual_targets import build_residuals
 
 
 def test_pooled_retriever_output_shape() -> None:
@@ -79,6 +80,45 @@ def test_full_bank_loss_prefers_correct_candidates() -> None:
 
     assert correct_loss < wrong_loss
     assert torch.isfinite(correct.grad).all()
+
+
+def test_full_bank_category_mask_removes_cross_category_shortcut() -> None:
+    candidates = torch.eye(4)
+    prediction = candidates[2].unsqueeze(0)
+    truth = torch.tensor([0])
+    global_loss = full_bank_contrastive_loss(
+        prediction, candidates, truth, temperature=0.1
+    )
+    category_loss = full_bank_contrastive_loss(
+        prediction,
+        candidates,
+        truth,
+        temperature=0.1,
+        candidate_mask=torch.tensor([[True, True, False, False]]),
+    )
+    assert category_loss < global_loss
+
+
+def test_category_residual_centroids_use_only_supplied_train_ids(tmp_path: Path) -> None:
+    values = {
+        "01-001": torch.tensor([1.0, 0.0]),
+        "01-002": torch.tensor([0.8, 0.2]),
+        "02-001": torch.tensor([0.0, 1.0]),
+        "02-002": torch.tensor([0.2, 0.8]),
+    }
+    rows = []
+    for video_id, value in values.items():
+        path = tmp_path / f"{video_id}.pt"
+        torch.save({"latent": value.unsqueeze(0), "tokens": 1}, path)
+        rows.append({
+            "video_id": video_id,
+            "category_id": video_id.split("-", 1)[0],
+            "latent_path": str(path),
+        })
+    residuals, centroids = build_residuals(rows, {"01-001", "02-001"})
+    torch.testing.assert_close(centroids["01"], torch.tensor([1.0, 0.0]))
+    torch.testing.assert_close(centroids["02"], torch.tensor([0.0, 1.0]))
+    assert set(residuals) == set(values)
 
 
 def test_pooled_loss_accepts_full_bank() -> None:

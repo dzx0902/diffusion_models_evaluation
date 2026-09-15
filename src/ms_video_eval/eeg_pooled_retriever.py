@@ -165,6 +165,7 @@ def full_bank_contrastive_loss(
     candidates: torch.Tensor,
     true_indices: torch.Tensor,
     temperature: float,
+    candidate_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Classify each prediction against every unique prompt in a caption bank."""
     if candidates.ndim != 2 or candidates.shape[1] != predicted.shape[1]:
@@ -181,6 +182,15 @@ def full_bank_contrastive_loss(
         @ F.normalize(candidates, dim=-1).t()
         / temperature
     )
+    if candidate_mask is not None:
+        if candidate_mask.shape != logits.shape:
+            raise ValueError(
+                f"Candidate mask {tuple(candidate_mask.shape)} != logits {tuple(logits.shape)}"
+            )
+        candidate_mask = candidate_mask.to(device=logits.device, dtype=torch.bool)
+        if not candidate_mask.gather(1, true_indices[:, None]).all():
+            raise ValueError("Candidate mask must retain every true target")
+        logits = logits.masked_fill(~candidate_mask, float("-inf"))
     return F.cross_entropy(logits, true_indices.to(logits.device, dtype=torch.long))
 
 
@@ -222,6 +232,7 @@ def pooled_retrieval_loss(
     covariance_weight: float = 0.005,
     contrastive_candidates: torch.Tensor | None = None,
     contrastive_true_indices: torch.Tensor | None = None,
+    contrastive_candidate_mask: torch.Tensor | None = None,
     variance_target_std: torch.Tensor | float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     mse = F.mse_loss(predicted, target)
@@ -241,6 +252,7 @@ def pooled_retrieval_loss(
             contrastive_candidates,
             contrastive_true_indices,
             temperature,
+            contrastive_candidate_mask,
         )
     variance = variance_loss(predicted, variance_target_std)
     covariance = covariance_loss(predicted)
