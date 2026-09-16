@@ -43,7 +43,8 @@ def main() -> None:
             frames = sample_video(Path(item["output"]), args.sample_every)
             metrics = frame_diagnostics(frames)
             trajectories = item.get("trajectory_paths") or ([item["trajectory"]] if item.get("trajectory") else [])
-            if trajectories and generator_route in {"tora", "tora_injected"}:
+            if (trajectories and generator_route in {"tora", "tora_injected"}
+                    and item.get("trajectory_origin") != "synthetic_shared_static"):
                 scores = [
                     trajectory_direction_score(frames, parse_trajectory_points(Path(path)))
                     for path in trajectories
