@@ -87,3 +87,39 @@ ls -lh outputs/eeg_semantic/c2_train_reconstruction/evaluation/video_metrics.csv
 能否接近 text_pca；最后看 eeg_swapped 是否随来源 caption 改变。
 即使 matched 显著好于 swapped，也只支持训练样本条件区分有效，不排除样本记忆。
 独立刺激时序核验仍未完成。跨 session 泛化需另开只用 session1/2 训练的实验。
+
+## YOLO 逐帧目标检查
+
+复用 `configs/ms_eval_settings.yaml` 的 YOLO11x、0.25阈值、类别别名与旧探针评分：
+`0.5*entity_coverage + 0.3*mean_entity_presence + 0.2*full_entity_frame_rate`。
+该分数是启发式出现率组合，不是目标检测准确率/mAP；没有人工框标注就不声称检测 mAP。
+默认每4帧抽一帧（49帧视频各13帧），48视频共624帧。
+
+```bash
+cd ~/workspace/diffusion_models_evaluation
+mkdir -p outputs/eeg_semantic/logs
+tmux new-session -d -s c2-yolo bash -lc '
+set -eo pipefail
+cd "$HOME/workspace/diffusion_models_evaluation"
+conda run --no-capture-output -n ms-video-eval python -u \
+  scripts/evaluate_c2_reconstruction_yolo.py \
+  --sample-every 4 \
+  2>&1 | tee -a outputs/eeg_semantic/logs/c2_train_recon_yolo.log
+'
+```
+
+默认使用工作目录的 `yolo11x.pt`；模型缺失时不会自动下载，使用 `--model 实际路径` 指定之前的权重。
+若需每一帧都检测，使用 `--sample-every 1 --output-dir outputs/eeg_semantic/c2_train_reconstruction/yolo_allframes`，
+不要混用已生成的抽帧结果。相同配置续跑会复用已有检测JSON；源视频、权重和配置有变化则拒绝复用。
+
+```bash
+tail -n 30 -F outputs/eeg_semantic/logs/c2_train_recon_yolo.log
+cat outputs/eeg_semantic/c2_train_reconstruction/yolo/report.md
+cat outputs/eeg_semantic/c2_train_reconstruction/yolo/completed.json
+```
+
+输出：`yolo/video_scores.csv`、`frame_scores.csv`、`summary.csv`、`paired_deltas.csv`，
+以及 `yolo/<arm>/<video_id>_seed0/annotated/frame_*.jpg` 检测框与原始类别名。
+`flower` 使用 `potted plant/vase` 代理，汇总单列不含花的01/02/03/06类。
+四组必须匹配相同视频和seed；帧不作为独立统计样本，不自动作显著性宣称。
+同类别互换仍然具有相同的核心对象，因此 YOLO 无法独立检验动作、关系或细粒度语义来源。
