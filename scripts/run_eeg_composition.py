@@ -89,6 +89,11 @@ def train(args, p, fingerprint, output):
                  "weight_decay": 1e-4, "pair_weight": .5 if args.variant == "original" else 0.,
                  "fused_weight": 1., "consistency_weight": .05, "noise_std": .02, "time_mask_samples": 20,
                  "selection": "01-06 validation allowed-session mean object macro AP", "precision": "float32"}
+    selection = getattr(args, "selection", "macro_ap")
+    if selection not in ("macro_ap", "top2_exact"):
+        raise ValueError("Unknown checkpoint selection")
+    if selection == "top2_exact":
+        signature["selection"] = "held-pair development allowed-session mean top2 exact"
     output.mkdir(parents=True, exist_ok=True)
     if (output / "completed.json").exists():
         if json.loads((output / "completed.json").read_text())["signature"] != signature:
@@ -147,11 +152,15 @@ def train(args, p, fingerprint, output):
             total += float(loss.detach())*len(batch)
         scheduler.step()
         logits = infer(model,p["eeg"],vi,sessions,800,mean,std,args.device,args.batch_size).mean(1)
-        score = metrics(logits,p["labels"][vi],.5,cardinality=2)["informative_macro_ap"]
+        validation_metrics = metrics(logits,p["labels"][vi],.5,cardinality=2)
+        score = (validation_metrics["informative_macro_ap"] if selection == "macro_ap"
+                 else validation_metrics["topk_metrics"]["exact_set_accuracy"])
         improved = score > best
         if improved:
             best = score
-        history.append({"epoch":epoch,"optimizer_updates":updates,"train_loss":total/len(ti),"validation_macro_ap":score})
+        history.append({"epoch":epoch,"optimizer_updates":updates,"train_loss":total/len(ti),
+                        "validation_macro_ap":validation_metrics["informative_macro_ap"],
+                        "selection_score":score})
         state = {"signature":signature,"model":model.state_dict(),"optimizer":opt.state_dict(),"scheduler":scheduler.state_dict(),
                  "epoch":epoch,"updates":updates,"best":best,"history":history,"mean":mean,"std":std,
                  "sampler_rng":generator.get_state(),"torch_rng":torch.get_rng_state(),
@@ -160,7 +169,7 @@ def train(args, p, fingerprint, output):
             atomic_save(state,output / "best.pt")
         atomic_save(state,output / "last.pt")
         atomic_json(history,output / "history.json")
-        print(f"[composition] {args.protocol}/{args.variant} epoch={epoch}/{args.epochs} updates={updates} loss={total/len(ti):.4f} val_AP={score:.4f}",flush=True)
+        print(f"[composition] {args.protocol}/{args.variant} epoch={epoch}/{args.epochs} updates={updates} loss={total/len(ti):.4f} val_{selection}={score:.4f}",flush=True)
     atomic_json({"signature":signature,"optimizer_updates":updates,"status":"COMPLETE"},output / "completed.json")
 
 
