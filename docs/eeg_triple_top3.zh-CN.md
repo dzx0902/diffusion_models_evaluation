@@ -40,3 +40,31 @@ cat outputs/eeg_composition_top3_6s/seed42/report.zh-CN.md
 
 本脚本只使用可信本地torch预测文件，weights_only加载，不读取服务器外部任意checkpoint。
 当前限制：单被试、单seed、刺激独立时序核验NOT_VERIFIED、07/08已用于探索。
+
+## 与论文前文一致的紧凑表格
+
+```bash
+conda run --no-capture-output -n eeg-semantic python \
+  scripts/build_three_entity_paper_table.py \
+  --root outputs/eeg_composition_v2 \
+  --output-dir outputs/eeg_composition_paper/seed42 --dry-run
+
+conda run --no-capture-output -n eeg-semantic python \
+  scripts/build_three_entity_paper_table.py \
+  --root outputs/eeg_composition_v2 \
+  --output-dir outputs/eeg_composition_paper/seed42
+
+cat outputs/eeg_composition_paper/seed42/section.tex
+```
+
+无需训练或GPU，只读取8份完整6秒预测。表格只有4行数据：Session-Average和
+Cross-Session各两种训练目标，不列逐session、滑窗或打乱对照。7个指标为Macro AP、
+Micro AP、Macro AUC、Micro AUC、Top-3 F1、Set Accuracy、Jaccard。
+Macro AP/AUC仅含dog、ball、flower、bird：person全正、car全负，无正负排序意义。
+Micro AP/AUC展开全部视频×六标签计算，仍包含person/car，可能受标签先验影响；
+所有集合指标也包含六标签，Jaccard为逐视频交并比的平均，不是先平均F1再换算。
+跨session先分别计算指标后平均三方向，不合并概率，也不生成误导性的被试间标准差。
+单被试、单seed，不与前文20被试结果等同。表注明确logit平均不同于前文信号平均。
+输出metrics.json（含8方向原始指标及输入哈希）、table.tex、section.tex。
+表格使用booktabs、两层表头、紧凑列距，不使用resizebox强制放大；需在用户论文模板中编译检查最终宽度。
+旧输出存在则拒绝覆盖。此处不提供未经验证的chance AP/AUC或Jaccard占位值。
