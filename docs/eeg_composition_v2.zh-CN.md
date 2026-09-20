@@ -93,3 +93,21 @@ outputs/eeg_composition_v2/
 新训练目录含best.pt、last.pt、history.json、completed.json，可通过--resume恢复。
 summary包含开发和测试，但有development_only字段，必须分开解释。
 更改训练预算请用新的--output-root；不要覆盖旧实验。原始checkpoint不会被本脚本写入。
+
+## 下一步只读检查
+
+不要重跑已经完成的audit-baseline/object-only。继续上面的12组development即可；
+--resume可恢复中断训练，已有同配置completed.json的训练会跳过。
+
+新增报告入口只读取audit.json，不需要GPU，不重新推理，也不修改实验结果：
+
+```bash
+python scripts/report_eeg_composition_v2.py --section test --protocols session_average
+python scripts/report_eeg_composition_v2.py --section test --protocols cs_s1 cs_s2 cs_s3
+python scripts/report_eeg_composition_v2.py --section development --protocols session_average
+```
+
+test报告展示所有三种输入方式、07/08分项、六主体Top-k/阈值指标和打乱零假设分位数。
+development报告列出六种留出组合的original/object_only配对差值；仅在12份报告齐全时
+输出六方向宏平均和胜/平/负数量，不将部分完成当成完整结果，不自动选择赢家。
+这些方向共享大量训练数据，不能作为六个独立重复实验直接做显著性声明。
