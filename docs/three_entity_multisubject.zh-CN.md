@@ -59,3 +59,45 @@ cat outputs/eeg_composition_multisubject/report/metrics.json
 表包含原论文7个指标mean±std和chance行，不拆逐session，不加dagger，不强制表头换行。
 mean±std较宽，论文双栏模板可放table*；需在最终模板中编译检查，不伪造被试数。
 数据独立时序核验仍NOT_VERIFIED；既有被试被探索过，应如实标为探索性扩展。
+
+## 独立的全部20被试实验
+
+保留5人实验，另用outputs/eeg_composition_all20。扫描服务器data-root中带session目录的
+所有被试目录，严格要求恰好20人且三Session文件齐全，不能从更多人中截取前20，
+也不能将不完整的20人筛成较少人后仍标20。若服务器目录不完整，先补齐或指定正确--data-root。
+首次run固定plan.json，续跑时名单变化会报错。dry-run不写文件，只做文件存在性检查。
+
+```bash
+conda run --no-capture-output -n eeg-semantic python \
+  scripts/run_three_entity_multisubject.py \
+  --all-subjects --expected-subjects 20 \
+  --output-root outputs/eeg_composition_all20 \
+  --device cuda --resume --dry-run
+
+mkdir -p outputs/eeg_semantic/logs
+tmux new-session -d -s triple-all20 bash -lc '
+set -eo pipefail
+cd "$HOME/workspace/diffusion_models_evaluation"
+conda run --no-capture-output -n eeg-semantic python -u \
+  scripts/run_three_entity_multisubject.py \
+  --all-subjects --expected-subjects 20 \
+  --output-root outputs/eeg_composition_all20 \
+  --device cuda --resume \
+  2>&1 | tee -a outputs/eeg_semantic/logs/triple_all20.log
+'
+
+tail -n 30 -F outputs/eeg_semantic/logs/triple_all20.log
+
+conda run --no-capture-output -n eeg-semantic python \
+  scripts/run_three_entity_multisubject.py --stage summarize \
+  --all-subjects --expected-subjects 20 \
+  --output-root outputs/eeg_composition_all20
+
+cat outputs/eeg_composition_all20/report/table.tex
+```
+
+20人×2目标×4协议=160组，100epochs/seed42；重叠5人在独立目录重训，不自动拷贝旧checkpoint。
+单GPU建议5人实验结束后再启动20人实验，避免同时抢GPU。
+最终mean±std按20个被试级指标计算，ddof=1；仍为被试内训练，不是跨被试泛化。
+5人是20人的子集（若数据名单一致），两个队列不能作为独立实验做显著性比较。
+本机只有16个候选目录且部分session缺失，20人真实运行须在完整服务器数据上进行。

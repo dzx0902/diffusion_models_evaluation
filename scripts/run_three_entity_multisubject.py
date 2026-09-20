@@ -20,6 +20,22 @@ DEFAULT_SUBJECTS = ["chentianlin", "duzhuoxuan", "fangzikai", "luotianming", "ni
 VARIANTS = ("original", "object_only")
 
 
+def discover_subjects(data_root, expected=20):
+    if not data_root.is_dir():
+        raise FileNotFoundError(data_root)
+    subjects = sorted(p.name for p in data_root.iterdir() if p.is_dir()
+                      and any((p / f"session{s}").is_dir() for s in range(1,4)))
+    missing = []
+    for subject in subjects:
+        sessions = [s for s in range(1,4) if (data_root / subject / f"session{s}/EEG/eeg_data.npz").is_file()]
+        print(f"[cohort] {subject}: sessions={sessions}",flush=True)
+        missing.extend(f"{subject}/session{s}/EEG/eeg_data.npz" for s in range(1,4) if s not in sessions)
+    if len(subjects) != expected or missing:
+        raise ValueError(f"Expected exactly {expected} subjects with all three sessions; found {len(subjects)}. "
+                         "No incomplete subject is silently excluded. Missing files: " + ", ".join(missing))
+    return subjects
+
+
 def group_statistics(reports, subjects):
     if len(subjects) < 2 or len(set(subjects)) != len(subjects):
         raise ValueError("At least two distinct, pre-specified subjects required")
@@ -119,9 +135,12 @@ def summarize(args, plan):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage",choices=("run","worker","summarize"),default="run")
-    parser.add_argument("--subjects",nargs="+",default=DEFAULT_SUBJECTS)
+    cohort = parser.add_mutually_exclusive_group()
+    cohort.add_argument("--subjects",nargs="+")
+    cohort.add_argument("--all-subjects",action="store_true")
+    parser.add_argument("--expected-subjects",type=int)
     parser.add_argument("--data-root",type=Path,default=Path("data/EEG_and_EYE"))
-    parser.add_argument("--output-root",type=Path,default=Path("outputs/eeg_composition_multisubject"))
+    parser.add_argument("--output-root",type=Path)
     parser.add_argument("--seed",type=int,default=42)
     parser.add_argument("--epochs",type=int,default=100)
     parser.add_argument("--batch-size",type=int,default=32)
@@ -133,6 +152,22 @@ def main():
     parser.add_argument("--protocol",choices=base.PROTOCOLS,default="cs_s3")
     parser.add_argument("--variant",choices=VARIANTS,default="original")
     args = parser.parse_args()
+    if args.expected_subjects is not None and args.expected_subjects < 2:
+        parser.error("Expected subject count must be at least two")
+    if args.all_subjects and args.stage == "worker":
+        parser.error("Worker must specify one subject")
+    args.output_root = args.output_root or Path("outputs/eeg_composition_all20" if args.all_subjects else "outputs/eeg_composition_multisubject")
+    if args.all_subjects:
+        frozen_path = args.output_root / "plan.json"
+        if args.stage == "summarize" and frozen_path.exists():
+            args.subjects = json.loads(frozen_path.read_text())["subjects"]
+        else:
+            args.subjects = discover_subjects(args.data_root,args.expected_subjects or 20)
+    else:
+        args.subjects = args.subjects or list(DEFAULT_SUBJECTS)
+    expected = args.expected_subjects or (20 if args.all_subjects else None)
+    if expected is not None and len(args.subjects) != expected:
+        parser.error(f"Expected {expected} subjects, got {len(args.subjects)}")
     if min(args.epochs,args.batch_size,args.threads) < 1 or args.lr <= 0:
         parser.error("Positive budgets required")
     if len(set(args.subjects)) != len(args.subjects) or any(Path(s).name != s or s in (".","..") for s in args.subjects):

@@ -29,6 +29,21 @@ def test_missing_subject_or_direction_fails():
     with pytest.raises(ValueError): runner.group_statistics({"a":rows(.2),"b":rows(.4)[:-1]},["a","b"])
 
 
+def test_all20_discovery_requires_exact_count_and_complete_sessions(tmp_path):
+    for i in range(20):
+        for s in range(1,4):
+            path = tmp_path / f"subject{i:02d}/session{s}/EEG/eeg_data.npz"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"fixture")
+    names = runner.discover_subjects(tmp_path)
+    assert len(names) == 20 and names == sorted(names)
+    with pytest.raises(ValueError,match="exactly 21"):
+        runner.discover_subjects(tmp_path,21)
+    (tmp_path / "subject19/session3/EEG/eeg_data.npz").unlink()
+    with pytest.raises(ValueError,match="subject19/session3"):
+        runner.discover_subjects(tmp_path)
+
+
 def test_fixed_top3_worker_smoke(tmp_path):
     torch.set_num_threads(1)
     ids = [f"{c:02d}-{v:03d}" for c in range(1,9) for v in range(1,79)]
